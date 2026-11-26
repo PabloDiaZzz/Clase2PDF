@@ -50,7 +50,7 @@ THEME = Theme(
 )
 console = Console(theme=THEME)
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 
 
 def _load_genai():
@@ -480,6 +480,7 @@ def manage_api_keys_menu(runtime_dir: Path, legacy_pipe_dir: Path | None = None)
             choices=[
                 Choice("Añadir nueva clave de API", value="add"),
                 Choice("Probar claves guardadas", value="test"),
+                Choice("Eliminar una clave concreta", value="delete_one"),
                 Choice("Borrar todas las claves", value="clear"),
                 Choice("Volver", value="back"),
             ],
@@ -503,6 +504,18 @@ def manage_api_keys_menu(runtime_dir: Path, legacy_pipe_dir: Path | None = None)
                     console.print(f"[ok]✓[/] API {slot}: OK")
                 else:
                     console.print(f"[err]✗[/] API {slot}: {escape(reason)}")
+        elif action == "delete_one":
+            if not saved:
+                console.print("[muted]No hay claves guardadas.[/]")
+                continue
+            target_path = questionary.select(
+                "¿Qué clave quieres eliminar?",
+                choices=[Choice(f"API {s}", value=p) for s, p, _ in saved] + [Choice("Cancelar", value=None)],
+                style=style,
+            ).ask()
+            if target_path is not None:
+                target_path.unlink(missing_ok=True)
+                console.print("[ok]✓[/] Clave eliminada.")
         elif action == "clear":
             if not saved:
                 console.print("[muted]No hay claves guardadas.[/]")
@@ -689,13 +702,13 @@ def _classify_error(exc: Exception) -> str:
         tok in msg for tok in ("perday", "per_day", "requestsperday", "daily")
     ):
         return "quota_daily"
+    if "429" in msg or "resource_exhausted" in msg:
+        return "rate_limit"
     if any(tok in msg for tok in ("500", "502", "503", "504", "unavailable", "high demand", "overloaded")):
         return "server_busy"
     if any(
         tok in msg
         for tok in (
-            "429",
-            "resource_exhausted",
             "remoteprotocolerror",
             "server disconnected",
             "readtimeout",
@@ -756,14 +769,14 @@ def _transient_reason(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
-def call_with_retry(fn, label: str, delays=RETRY_DELAYS, on_status=None):
+def call_with_retry(fn, label: str, delays=RETRY_DELAYS, on_status=None, *, retry_rate_limit: bool = True):
     """Reintenta solo errores transitorios (503 alta demanda, 429 RPM/TPM, cortes de red). Salta directo si es RPD o 404."""
     for idx in range(len(delays) + 1):
         try:
             return fn()
         except Exception as exc:
             kind = _classify_error(exc)
-            if kind in ("transient", "server_busy") and idx < len(delays):
+            if (kind in ("transient", "server_busy") or (kind == "rate_limit" and retry_rate_limit)) and idx < len(delays):
                 wait = delays[idx]
                 msg = f"[warn]Reintentando ({idx + 1}/{len(delays)}) en {wait}s...[/]"
                 if on_status:
@@ -829,6 +842,7 @@ def generate_with_fallback(
                     ),
                     f"{label} [{model}]",
                     on_status=on_status,
+                    retry_rate_limit=(c_pos + 1 >= len(candidates)),
                 )
                 pool.select(key_idx)
                 return resp, model
@@ -1080,9 +1094,12 @@ def render_summary(
 
 def read_docx_text(path: Path, max_chars: int = 80000) -> str:
     """Extrae texto plano de un .docx en Python puro sin dependencias externas."""
-    with zipfile.ZipFile(path) as zf:
-        xml_bytes = zf.read("word/document.xml")
-    root = ET.fromstring(xml_bytes)
+    try:
+        with zipfile.ZipFile(path) as zf:
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError):
+        return ""
     paragraphs: list[str] = []
     for elem in root.iter():
         if elem.tag.endswith("}p") or elem.tag == "p":
@@ -1901,6 +1918,12 @@ def _run_ffmpeg_with_progress(
         errors="replace",
         creationflags=low_prio,
     )
+    err_chunks: list[str] = []
+    def _drain_stderr():
+        if proc.stderr is not None:
+            err_chunks.append(proc.stderr.read())
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    err_thread.start()
     last_pct = -3
     if proc.stdout is not None:
         for line in proc.stdout:
@@ -1914,7 +1937,8 @@ def _run_ffmpeg_with_progress(
                         on_pct(pct)
                 except ValueError:
                     pass
-    stderr_out = proc.stderr.read() if proc.stderr is not None else ""
+    err_thread.join(timeout=5)
+    stderr_out = "".join(err_chunks)
     rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"Error procesando {audio.name}: {stderr_out.strip()}")
@@ -2264,6 +2288,8 @@ def transcribe_chunks(
                     else:
                         text = clean_text
                     _save_tx(tx_file, text)
+                    if not text.strip():
+                        raise RuntimeError(f"Transcripcion vacia en bloque {i}/{len(chunks)}.")
                     transcripts.append(text)
                     used_models.append(model_used)
                     words = len(text.split())
@@ -2430,6 +2456,8 @@ NUEVA TRANSCRIPCION:
         file_paths=upload_paths or None,
     )
     md_text = strip_markdown_fences(resp.text or "")
+    if not md_text.strip():
+        raise RuntimeError("Respuesta vacia del modelo al generar el documento.")
     ui.update_row("review", "[ok]✓ Listo[/]", "")
     return md_text, used_model
 
@@ -2492,6 +2520,8 @@ def md_to_html(md_text: str) -> str:
     out: list[str] = []
     list_tag: str | None = None
     table_rows: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
 
     def close_list():
         nonlocal list_tag
@@ -2507,6 +2537,19 @@ def md_to_html(md_text: str) -> str:
 
     for raw_line in md_text.splitlines():
         s = raw_line.strip()
+        if s.startswith("```"):
+            flush_table()
+            close_list()
+            if in_code:
+                out.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(raw_line)
+            continue
         if s.startswith("|") and s.endswith("|"):
             close_list()
             table_rows.append(s)
@@ -2548,21 +2591,27 @@ def md_to_html(md_text: str) -> str:
         else:
             close_list()
             out.append(f"<p>{format_inline(s)}</p>")
+    if code_lines:
+        out.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
     flush_table()
     close_list()
     return "\n".join(out)
 
 
 def find_browser() -> str:
+    local_app = os.environ.get("LOCALAPPDATA", "")
     candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        str(Path(local_app) / "Google" / "Chrome" / "Application" / "chrome.exe") if local_app else "",
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        str(Path(local_app) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe") if local_app else "",
     ]
     for c in candidates:
-        if Path(c).exists():
+        if c and Path(c).exists():
             return c
-    for name in ("msedge", "chrome"):
+    for name in ("msedge", "chrome", "brave"):
         found = shutil.which(name)
         if found:
             return found
@@ -2634,6 +2683,8 @@ def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
   th, td {{ border: 1px solid #cbd5e1; padding: 5px 8px; text-align: left; }}
   th {{ background: #f1f5f9; font-weight: 600; }}
   hr {{ border: none; border-top: 1px solid #cbd5e1; margin: 18px 0; }}
+  pre {{ background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 4px; padding: 8px 10px; font-family: Consolas, 'Courier New', monospace; font-size: 9.2pt; overflow-x: auto; white-space: pre-wrap; }}
+  pre code {{ background: none; padding: 0; }}
   .note {{ color: #475569; font-style: italic; font-size: 9.8pt; background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }}
 </style>
 </head>
@@ -2641,6 +2692,7 @@ def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
 </html>"""
     html_path.write_text(doc, encoding="utf-8")
     browser_err: Exception | None = None
+    tmp_pdf = pdf_path.with_suffix(".tmp.pdf")
     try:
         browser = find_browser()
         res = subprocess.run(
@@ -2649,17 +2701,21 @@ def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
                 "--headless=new",
                 "--disable-gpu",
                 "--no-pdf-header-footer",
-                f"--print-to-pdf={pdf_path}",
+                f"--print-to-pdf={tmp_pdf}",
                 html_path.as_uri(),
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
-        if res.returncode == 0 and pdf_path.exists():
+        if res.returncode == 0 and tmp_pdf.exists() and tmp_pdf.stat().st_size > 200:
+            tmp_pdf.replace(pdf_path)
             return
         browser_err = RuntimeError(f"Error exportando PDF ({res.returncode}): {res.stderr.strip()}")
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         browser_err = exc
+    finally:
+        tmp_pdf.unlink(missing_ok=True)
 
     try:
         _export_pdf_fpdf2(body, md_text, pdf_path)
@@ -2669,16 +2725,20 @@ def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
         raise
 
 
+def _sanitize_slug(raw: str) -> str:
+    title = re.sub(r"[*`]", "", raw).strip()
+    title = re.sub(r'[\\/:*?"<>|]+', "", title)
+    return re.sub(r"\s+", "_", title).strip("._")[:60].rstrip("._")
+
+
 def derive_subject_slug(md_text: str, fallback: str) -> str:
     for line in md_text.splitlines():
         s = line.strip()
         if s.startswith("# "):
-            title = re.sub(r"[*`]", "", s[2:]).strip()
-            title = re.sub(r'[\\/:*?"<>|]+', "", title)
-            title = re.sub(r"\s+", "_", title).strip("._")
-            if title:
-                return title[:60].rstrip("._")
-    return fallback
+            slug = _sanitize_slug(s[2:])
+            if slug:
+                return slug
+    return _sanitize_slug(fallback) or "clase"
 
 
 def _force_remove_readonly(func, path, exc_info):
@@ -2692,7 +2752,7 @@ def _force_remove_readonly(func, path, exc_info):
 def cleanup_intermediate(pipe_dir: Path):
     """Elimina archivos temporales tras generar el PDF y borra .clase_pipeline si queda vacia (venv/api_key viven en %LOCALAPPDATA%\\Clase2PDF)."""
     for attempt in range(4):
-        for sub in ("clean", "chunks", "transcripts", "slices"):
+        for sub in ("clean", "chunks", "transcripts", "slices", "topics"):
             p = pipe_dir / sub
             if p.exists():
                 shutil.rmtree(p, onerror=_force_remove_readonly)
@@ -2926,17 +2986,17 @@ def main():
         sys.exit(EXIT_OK)
 
     audios = sorted(
-        [p for p in root_dir.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTS],
+        [p for p in root_dir.iterdir() if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower() in AUDIO_EXTS],
         key=natural_key,
     )
     base_notes = sorted(
-        [p for p in root_dir.iterdir() if is_base_notes_pdf(p)],
+        [p for p in root_dir.iterdir() if not p.name.startswith(("~$", ".")) and is_base_notes_pdf(p)],
         key=natural_key,
     )
     docs = sorted(
         [
             p for p in root_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in DOC_EXTS and not is_base_notes_pdf(p)
+            if p.is_file() and not p.name.startswith(("~$", ".")) and p.suffix.lower() in DOC_EXTS and not is_base_notes_pdf(p)
         ],
         key=natural_key,
     )
@@ -3147,31 +3207,64 @@ def main():
             fallback_name = root_dir.name if root_dir.name else "clase"
             topic_jobs = _enforce_job_transcript_budget(topic_jobs, transcripts, fallback_name)
             out_prefix = TRANSCRIPT_PREFIX if output_mode == "transcripcion" else OUTPUT_PREFIX
-            generated_pdfs: list[Path] = []
+            topics_cache_dir = pipe_dir / "topics"
+            topics_cache_dir.mkdir(exist_ok=True)
+            synthesized: list[tuple[dict, str]] = []
 
             for j_idx, job in enumerate(topic_jobs, 1):
                 if len(topic_jobs) > 1:
                     ui.update_row("review", f"[accent]Tema {j_idx}/{len(topic_jobs)}...[/]", "")
-                md_text, rev_model = synthesize_notes(
-                    pool,
-                    job.get("transcripts") or transcripts,
-                    vocab,
-                    job["title"] or fallback_name,
-                    ui,
-                    base_notes=job["base"],
-                    mode=output_mode,
-                    guide_docs=job["guides"],
-                    style_only=job["style_only"],
-                    topic_focus=job["title"],
+                job_txs = job.get("transcripts") or transcripts
+                sig_payload = json.dumps(
+                    {
+                        "mode": output_mode,
+                        "title": job.get("title"),
+                        "style_only": job["style_only"],
+                        "tx": job_txs,
+                        "files": [(p.name, p.stat().st_mtime_ns) for p in (job["base"] + job["guides"]) if p.exists()],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
                 )
-                if rev_model not in models_used:
-                    models_used.append(rev_model)
-                if j_idx == len(topic_jobs):
-                    ui.set_progress(description=f"Paso {3 + step_off}/{total_steps} · Creando PDF...", advance=1)
+                job_sig = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()[:12]
+                topic_cache = topics_cache_dir / f"topic_{j_idx:02d}_{job_sig}.md"
+                cached_md = ""
+                if topic_cache.exists():
+                    try:
+                        cached_md = topic_cache.read_text(encoding="utf-8")
+                    except OSError:
+                        cached_md = ""
+                if cached_md.strip():
+                    md_text = cached_md
+                else:
+                    md_text, rev_model = synthesize_notes(
+                        pool,
+                        job_txs,
+                        vocab,
+                        job["title"] or fallback_name,
+                        ui,
+                        base_notes=job["base"],
+                        mode=output_mode,
+                        guide_docs=job["guides"],
+                        style_only=job["style_only"],
+                        topic_focus=job["title"],
+                    )
+                    if rev_model not in models_used:
+                        models_used.append(rev_model)
+                    t_tmp = topic_cache.with_suffix(".tmp.md")
+                    t_tmp.write_text(md_text, encoding="utf-8")
+                    os.replace(t_tmp, topic_cache)
+                synthesized.append((job, md_text))
 
-                base_name = derive_subject_slug(md_text, job["title"] or fallback_name)
+            ui.set_progress(description=f"Paso {3 + step_off}/{total_steps} · Creando PDF...", advance=1)
+            generated_pdfs: list[Path] = []
+            for j_idx, (job, md_text) in enumerate(synthesized, 1):
+                if len(synthesized) > 1 and job["title"]:
+                    base_name = derive_subject_slug(f"# {job['title']}", fallback_name)
+                else:
+                    base_name = derive_subject_slug(md_text, job["title"] or fallback_name)
                 pdf_out = unique_output_path(root_dir / f"{out_prefix}{base_name}.pdf")
-                ui.update_row("pdf", "[accent]Creando PDF...[/]", f"{j_idx}/{len(topic_jobs)}" if len(topic_jobs) > 1 else "")
+                ui.update_row("pdf", "[accent]Creando PDF...[/]", f"{j_idx}/{len(synthesized)}" if len(synthesized) > 1 else "")
                 export_pdf(md_text, pipe_dir, pdf_out)
                 if args.keep_md:
                     pdf_out.with_suffix(".md").write_text(md_text, encoding="utf-8")
@@ -3255,7 +3348,7 @@ def main():
                 console,
             )
             sys.exit(EXIT_AUTH)
-        if _classify_error(exc) in ("transient", "server_busy", "quota_daily"):
+        if _classify_error(exc) in ("transient", "server_busy", "quota_daily", "rate_limit"):
             reason = _transient_reason(exc)
             if reason.startswith("429 limite de tokens"):
                 fix_msg = "La peticion supero el limite de tokens/minuto (TPM). Espera 1 minuto o divide los audios (el progreso guardado se reutiliza)."

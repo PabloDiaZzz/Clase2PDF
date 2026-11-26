@@ -24,7 +24,7 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 ## Requisitos y primera ejecución
 
 - **Sistema operativo:** Windows 10 u 11.
-- **Navegador:** Microsoft Edge (incluido en Windows) o Google Chrome para maquetado avanzado (si no hay ninguno, usa `fpdf2` como respaldo automático).
+- **Navegador:** Microsoft Edge (incluido en Windows), Google Chrome o Brave para maquetado avanzado (si no hay ninguno o tarda demasiado, usa `fpdf2` como respaldo automático).
 - **Conexión a Internet:** necesaria en la primera ejecución para descargar `pipeline.py`, dependencias y validar tu API Key.
 - **API Key de Google Gemini:** gratuita desde [Google AI Studio](https://aistudio.google.com/apikey) (empieza por `AQ.`).
 
@@ -162,7 +162,7 @@ Detalle de cada fase:
 | Ubicación | Qué contiene |
 | :--- | :--- |
 | **Carpeta de la clase** | El resultado final (`APUNTES_<nombre>.pdf` o `TRANSCRIPCION_<nombre>.pdf`, y `.md` si usaste `--keep-md`). |
-| **`.clase_pipeline\`** *(dentro de la carpeta de clase)* | Temporales de esa ejecución (`clean/`, `chunks/`, `transcripts/`, `slices/`, `doc.html`). **Se borra automáticamente** al terminar. |
+| **`.clase_pipeline\`** *(dentro de la carpeta de clase)* | Temporales y caché de reanudación de esa ejecución (`clean/`, `chunks/`, `transcripts/`, `slices/`, `topics/`, `doc.html`). **Se borra automáticamente** al terminar. |
 | **`%LOCALAPPDATA%\Clase2PDF\`** | `pipeline.py`, entorno `venv\`, API Keys cifradas (`api_key*.dpapi`) y registro de errores (`last_error.log`). |
 
 ---
@@ -175,7 +175,8 @@ Si sueles procesar clases largas o varias seguidas, conviene añadir 2 o más AP
 .\procesar_clase.bat --apis
 ```
 
-- **Rotación automática (`429`):** si una clave agota su cuota, `Clase2PDF` pasa automáticamente a la siguiente clave manteniendo el mejor modelo.
+- **Gestión individual:** desde `--apis` puedes añadir, probar, eliminar una clave concreta o borrar todas las guardadas.
+- **Rotación automática (`429`):** si una clave agota su cuota, `Clase2PDF` pasa inmediatamente a la siguiente clave manteniendo el mejor modelo.
 - **Fallback de modelo (`503`):** si los servidores de un modelo están saturados, baja al siguiente modelo disponible al instante.
 - **Seguridad:** las claves se cifran localmente con Windows DPAPI (`api_key.dpapi`, `api_key_2.dpapi`, etc.) y **nunca** se muestran completas ni se suben a ninguna carpeta de clase.
 

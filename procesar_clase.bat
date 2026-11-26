@@ -48,7 +48,7 @@ set "UPD_RC=!errorlevel!"
 if "!UPD_RC!"=="10" (
     copy /y "%RUNTIME_DIR%\procesar_clase_new.bat" "%~f0" >nul
     set "CLASE2PDF_BAT_REEXEC=1"
-    cmd /c "%~f0" %*
+    cmd /c ""%~f0" %*"
     exit /b !errorlevel!
 )
 if not "!UPD_RC!"=="0" (

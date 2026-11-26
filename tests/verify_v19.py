@@ -157,7 +157,7 @@ try:
     try:
         r_up = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
         assert r_up.returncode == 0, f"Auto-update failed: {r_up.returncode} {r_up.stdout} {r_up.stderr}"
-        assert "Clase2PDF 1.9.1" in r_up.stdout
+        assert "Clase2PDF 1.9.2" in r_up.stdout
         assert (rt_dir / "pipeline.py").exists() and (rt_dir / ".pipe_hash").exists()
         assert (tmp_root / "INSTRUCCIONES.md").exists() and not (rt_dir / "INSTRUCCIONES.md").exists()
     finally:
@@ -166,7 +166,7 @@ try:
 
     # Offline fallback after server stopped (pipeline.py already cached)
     r_off = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
-    assert r_off.returncode == 0 and "Clase2PDF 1.9.1" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
+    assert r_off.returncode == 0 and "Clase2PDF 1.9.2" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
 
     # 6. v1.9.1: repetition-loop cleaner
     w_loop = "Inicio de clase. " + ("silencio " * 12) + "Fin."
@@ -238,6 +238,51 @@ try:
 
     # 9. v1.9.1: TPM 429 diagnostic message
     assert pipeline._transient_reason(RuntimeError("429 RESOURCE_EXHAUSTED input_token_count per minute")) == "429 limite de tokens por minuto (TPM)"
+
+    # 10. v1.9.2: fast 429 RPM rotation without retrying API 1 when API 2 exists
+    rpm_calls = []
+    class _RpmModels:
+        def __init__(self, owner):
+            self.owner = owner
+        def generate_content(self, model, contents, config=None):
+            rpm_calls.append((self.owner, model))
+            if self.owner == "API1":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED rate limit")
+            return type("Resp", (), {"text": "ok"})()
+    pool_rpm = pipeline.ClientPool(
+        [(1, "AIzaSyKeyOne000000001"), (2, "AIzaSyKeyTwo000000002")],
+        client_factory=lambda k: type("C", (), {"models": _RpmModels("API1" if "One" in k else "API2")})(),
+    )
+    _, rpm_mod = pipeline.generate_with_fallback(pool_rpm, "p", None, "RpmTest", on_status=lambda m: None)
+    assert rpm_mod == "gemini-4-hydrogen"
+    assert rpm_calls == [("API1", "gemini-4-hydrogen"), ("API2", "gemini-4-hydrogen")], rpm_calls
+
+    # 11. v1.9.2: corrupt/lock docx returns "" cleanly instead of crashing
+    bad_docx = tmp_root / "~$corrupt.docx"
+    bad_docx.write_bytes(b"not a zip")
+    assert pipeline.read_docx_text(bad_docx) == ""
+
+    # 12. v1.9.2: md_to_html renders fenced code blocks as <pre><code>
+    code_html = pipeline.md_to_html("```python\nx = 1 < 2\n```")
+    assert "<pre><code>x = 1 &lt; 2</code></pre>" in code_html, code_html
+
+    # 13. v1.9.2: derive_subject_slug sanitizes illegal Windows chars in fallback
+    assert pipeline.derive_subject_slug("Sin titulo H1", 'Tema 1: A/B*?"<>|') == "Tema_1_AB"
+
+    # 14. v1.9.2: export_pdf falls back to fpdf2 when browser times out
+    orig_run = pipeline.subprocess.run
+    orig_fb2 = pipeline.find_browser
+    try:
+        pipeline.find_browser = lambda: "msedge.exe"
+        def _timeout_run(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="msedge", timeout=120)
+        pipeline.subprocess.run = _timeout_run
+        to_pdf = tmp_root / "timeout_fallback.pdf"
+        pipeline.export_pdf("# Prueba Timeout\n\nContenido.", tmp_root, to_pdf)
+        assert to_pdf.exists() and to_pdf.stat().st_size > 500
+    finally:
+        pipeline.subprocess.run = orig_run
+        pipeline.find_browser = orig_fb2
 
     # Remove junction safely before rmtree
     subprocess.run(["cmd", "/c", "rmdir", str(rt_dir / "venv")], check=True, capture_output=True)

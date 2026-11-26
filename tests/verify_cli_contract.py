@@ -11,7 +11,7 @@ ENV = {**os.environ, "CLASE2PDF_NO_UPDATE": "1"}
 # 1. --version
 r_ver = subprocess.run(["cmd", "/c", BAT, "--version"], capture_output=True, text=True, encoding="utf-8", env=ENV)
 assert r_ver.returncode == 0, f"--version failed: {r_ver.returncode} {r_ver.stderr}"
-assert "Clase2PDF 1.9.1" in r_ver.stdout, r_ver.stdout
+assert "Clase2PDF 1.9.2" in r_ver.stdout, r_ver.stdout
 
 # 2. --help
 r_help = subprocess.run(["cmd", "/c", BAT, "--help"], capture_output=True, text=True, encoding="utf-8", env=ENV)
