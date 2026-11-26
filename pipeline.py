@@ -462,7 +462,7 @@ def manage_api_keys_menu(runtime_dir: Path, legacy_pipe_dir: Path | None = None)
             ("answer", "fg:#00ff87 bold"),
             ("pointer", "fg:#00d7ff bold"),
             ("highlighted", "fg:#00d7ff bold"),
-            ("selected", "fg:#00ff87 bold"),
+            ("selected", "fg:#00ff87 bold noreverse"),
             ("instruction", "fg:#808080"),
         ]
     )
@@ -980,7 +980,7 @@ def resolve_output_mode(
                 ("answer", "fg:#00ff87 bold"),
                 ("pointer", "fg:#00d7ff bold"),
                 ("highlighted", "fg:#00d7ff bold"),
-                ("selected", "fg:#00ff87 bold"),
+                ("selected", "fg:#00ff87 bold noreverse"),
                 ("instruction", "fg:#808080"),
             ]
         )
