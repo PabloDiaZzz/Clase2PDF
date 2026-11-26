@@ -369,7 +369,7 @@ def _prompt_api_key_interactive(
         raise _CLIError(
             code="EMPTY_API_KEY" if not key else "INVALID_API_KEY_FORMAT",
             message="La clave de API no es valida.",
-            fix="Copia solo la clave (empieza por AIza...) sin espacios y vuelve a ejecutar.",
+            fix="Copia solo la clave (empieza por AQ. o AIza...) sin espacios y vuelve a ejecutar.",
             exit_code=EXIT_CONFIG,
             transient=False,
         )

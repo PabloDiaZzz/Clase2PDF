@@ -25,7 +25,7 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 - **Sistema operativo:** Windows 10 u 11.
 - **Navegador:** Microsoft Edge (incluido en Windows) o Google Chrome (necesario para generar el PDF final).
 - **Conexión a Internet:** necesaria en la primera ejecución para descargar `pipeline.py`, dependencias y validar tu API Key.
-- **API Key de Google Gemini:** gratuita desde [Google AI Studio](https://aistudio.google.com/apikey) (empieza por `AIza...`).
+- **API Key de Google Gemini:** gratuita desde [Google AI Studio](https://aistudio.google.com/apikey) (empieza por `AQ.`).
 
 > [!TIP]
 > La primera vez que abras `procesar_clase.bat`, si te faltan `ffmpeg` o `Python 3.12+`, el propio script intentará instalarlos automáticamente con `winget` y preparará su entorno aislado en `%LOCALAPPDATA%\Clase2PDF`.
@@ -38,7 +38,7 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 
 1. Mete en una carpeta tus **audios/vídeos** de clase (y opcionalmente diapositivas o PDFs de apoyo).
 2. **Doble clic** en `procesar_clase.bat` dentro de esa carpeta **o arrastra la carpeta** encima del icono de `procesar_clase.bat`.
-3. Si es la primera vez, pega tu API Key (`AIza...`) cuando te la pida. Se guarda cifrada con DPAPI de Windows.
+3. Si es la primera vez, pega tu API Key (`AQ....`) cuando te la pida. Se guarda cifrada con DPAPI de Windows.
 4. Elige el modo cuando te pregunte:
    - **`apuntes`**: genera apuntes estructurados listos para estudiar.
    - **`transcripcion`**: genera la transcripción completa y fiel de la clase.
@@ -169,7 +169,7 @@ procesar_clase.bat
 | Error | Causa | Solución |
 | :--- | :--- | :--- |
 | `MISSING_API_KEY` / `EMPTY_API_KEY` | No hay ninguna API Key guardada o se introdujo vacía. | Ejecuta `procesar_clase.bat --add-api` y pega una clave válida de AI Studio. |
-| `INVALID_API_KEY_FORMAT` | La clave pegada no tiene el formato correcto (no empieza por `AIza` o es demasiado corta). | Copia la clave completa desde [Google AI Studio](https://aistudio.google.com/apikey) sin espacios. |
+| `INVALID_API_KEY_FORMAT` | La clave pegada no tiene el formato correcto (demasiado corta, con espacios o caracteres inválidos). | Copia la clave completa (empieza por `AQ.`) desde [Google AI Studio](https://aistudio.google.com/apikey) sin espacios. |
 | `API_KEY_TEST_FAILED` / `AUTH_FAILED` | Clave revocada, inválida, sin permisos o bloqueada (`401`/`403`). | Revisa la clave en `--apis`, bórrala con `--reset-key` o genera una nueva en AI Studio. |
 | `API_UNAVAILABLE` *(código 75)* | Todas tus APIs están sin cuota (`429`) o los servidores de Gemini están caídos/saturados (`503`). | Espera unos minutos o añade otra API Key de otra cuenta con `procesar_clase.bat --add-api`. |
 | `RemoteProtocolError: Server disconnected` | Corte puntual de red o timeout del servidor al subir/procesar un audio largo. | Vuelve a ejecutar `procesar_clase.bat`: reintentará con backoff y aprovechará la caché de audio ya limpiado. |

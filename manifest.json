@@ -1,6 +1,6 @@
 {
   "version": "1.9.0",
-  "pipeline_sha256": "8e03e3cbbee442c21f23a5e157b3eb190d429658443500fd0de3a2ce4bc0d787",
+  "pipeline_sha256": "f6ceadb22b11a7690b1416ae44ce90916799993bb3c31e9444110216f19cb0ff",
   "bat_sha256": "b4447e14f8df5d63c0fa72c6a16f6daaabf4b4e56950f15f480e8e2fe8ed6086",
   "req_hash": "7a4d457a1d19e19a",
   "requirements": [
@@ -9,5 +9,5 @@
     "questionary",
     "pypdf"
   ],
-  "instructions_sha256": "5be57e74a1b5c36d5c10296fa0a559bcd7cd842086f91cc666d4d6eab3ef853d"
+  "instructions_sha256": "8d078cccd1900aa84a2c14213048ca02dbd753e09dafc81338f8733f2b900fd4"
 }
