@@ -157,7 +157,7 @@ try:
     try:
         r_up = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
         assert r_up.returncode == 0, f"Auto-update failed: {r_up.returncode} {r_up.stdout} {r_up.stderr}"
-        assert "Clase2PDF 1.9.0" in r_up.stdout
+        assert "Clase2PDF 1.9.1" in r_up.stdout
         assert (rt_dir / "pipeline.py").exists() and (rt_dir / ".pipe_hash").exists()
         assert (tmp_root / "INSTRUCCIONES.md").exists() and not (rt_dir / "INSTRUCCIONES.md").exists()
     finally:
@@ -166,7 +166,78 @@ try:
 
     # Offline fallback after server stopped (pipeline.py already cached)
     r_off = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
-    assert r_off.returncode == 0 and "Clase2PDF 1.9.0" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
+    assert r_off.returncode == 0 and "Clase2PDF 1.9.1" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
+
+    # 6. v1.9.1: repetition-loop cleaner
+    w_loop = "Inicio de clase. " + ("silencio " * 12) + "Fin."
+    cw, dw = pipeline._clean_repetition_loops(w_loop)
+    assert dw == 11 and cw == "Inicio de clase. silencio Fin.", (cw, dw)
+
+    p_loop = "Tema uno. " + ("es decir esto " * 5) + "Continuamos con la explicacion."
+    cp, dp = pipeline._clean_repetition_loops(p_loop)
+    assert dp == 12 and "Continuamos con la explicacion." in cp, (cp, dp)
+
+    l_loop = "\n".join(["Linea normal uno.", "Linea repetida."] + ["Linea repetida."] * 4 + ["Linea normal dos."])
+    cl, dl = pipeline._clean_repetition_loops(l_loop)
+    assert dl == 8 and cl.splitlines() == ["Linea normal uno.", "Linea repetida.", "Linea normal dos."], (cl, dl)
+
+    normal = "La célula eucariota posee núcleo definido. Además, las mitocondrias producen ATP."
+    cn, dn = pipeline._clean_repetition_loops(normal)
+    assert dn == 0 and cn == normal
+
+    # 7. v1.9.1: cached looped transcript triggers retry with temperature=0.2
+    tx_test_dir = tmp_root / "tx_retry"
+    (tx_test_dir / "transcripts").mkdir(parents=True, exist_ok=True)
+    fake_chunk = tx_test_dir / "b1.mp3"
+    fake_chunk.write_bytes(b"fake")
+    (tx_test_dir / "transcripts" / "b1.txt").write_text("hola " * 20000, encoding="utf-8")
+
+    orig_up = pipeline._upload_local_file
+    orig_wait = pipeline.wait_file_active
+    orig_gwf2 = pipeline.generate_with_fallback
+    retry_configs = []
+    try:
+        pipeline._upload_local_file = lambda c, p, on_status=None: type("F", (), {"name": "files/fake"})()
+        pipeline.wait_file_active = lambda c, f, on_status=None: f
+        def _fake_gwf_retry(pool_arg, contents, config, label, **kw):
+            retry_configs.append(config)
+            return type("R", (), {"text": "Transcripcion limpia y completa de la clase."})(), "gemini-4-hydrogen"
+        pipeline.generate_with_fallback = _fake_gwf_retry
+
+        txs_out, _ = pipeline.transcribe_chunks(pool_429, [fake_chunk], [], tx_test_dir, ui)
+        assert len(retry_configs) == 1
+        assert getattr(retry_configs[0], "temperature", None) == 0.2
+        assert txs_out == ["Transcripcion limpia y completa de la clase."]
+        assert (tx_test_dir / "transcripts" / "b1.txt").read_text(encoding="utf-8") == "Transcripcion limpia y completa de la clase."
+    finally:
+        pipeline._upload_local_file = orig_up
+        pipeline.wait_file_active = orig_wait
+        pipeline.generate_with_fallback = orig_gwf2
+
+    # 8. v1.9.1: plan_transcript_topics zero-loss coverage & _enforce_job_transcript_budget
+    orig_gwf3 = pipeline.generate_with_fallback
+    try:
+        # Mock LLM intentionally omits block 2 -> zero-loss guard must still include all 3 blocks
+        pipeline.generate_with_fallback = lambda *a, **kw: (
+            type("R", (), {"text": '{"topics": [{"title": "Tema A", "blocks": [1]}, {"title": "Tema B", "blocks": [3]}]}'})(),
+            "gemini-3.6-flash",
+        )
+        blocks_in = ["uno " * 100, "dos " * 100, "tres " * 100]
+        jobs_tx, _, _ = pipeline.plan_transcript_topics(pool_429, blocks_in, ui, max_words_per_topic=500)
+        assert len(jobs_tx) >= 2
+        recovered_words = sum(len(t.split()) for j in jobs_tx for t in j["transcripts"])
+        assert recovered_words == 300, recovered_words
+
+        big_job = [{"base": [], "guides": [], "style_only": False, "title": "Bloque Gigante", "transcripts": ["palabra " * 250]}]
+        enforced = pipeline._enforce_job_transcript_budget(big_job, [], "clase", max_words=100)
+        assert len(enforced) == 3
+        assert sum(len(t.split()) for j in enforced for t in j["transcripts"]) == 250
+        assert enforced[0]["title"].endswith("(Parte 1)")
+    finally:
+        pipeline.generate_with_fallback = orig_gwf3
+
+    # 9. v1.9.1: TPM 429 diagnostic message
+    assert pipeline._transient_reason(RuntimeError("429 RESOURCE_EXHAUSTED input_token_count per minute")) == "429 limite de tokens por minuto (TPM)"
 
     # Remove junction safely before rmtree
     subprocess.run(["cmd", "/c", "rmdir", str(rt_dir / "venv")], check=True, capture_output=True)

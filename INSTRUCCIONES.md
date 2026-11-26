@@ -93,10 +93,12 @@ Detalle de cada fase:
    - Si un audio es largo, lo divide en bloques de 45 minutos (con 15 segundos de solapamiento) dentro de `.clase_pipeline/`. Guarda huella de cada audio para no repetir la limpieza si reintentas tras un fallo.
 5. **Transcripción por bloques:**
    - Sube cada bloque limpio a Gemini, lo transcribe apoyándose en el vocabulario técnico y elimina el archivo remoto al terminar.
+   - Si Gemini entra en bucle repitiendo palabras o frases ante silencios, el script lo detecta, limpia y reintenta automáticamente con temperatura baja.
    - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena.
-6. **Filtrado y división de documentos (Triage):**
+6. **Filtrado y división de documentos o clases largas (Triage):**
    - Si hay varios documentos o algún PDF supera las 25 páginas, recorta literalmente solo las páginas relevantes con `pypdf` sin resumir.
    - Si hay un único PDF grande (`> 25 páginas`) como base (o como guía en modo `apuntes`), planifica y divide el trabajo por temas para generar varios PDFs temáticos en lugar de un único PDF gigante.
+   - Si la transcripción total de la clase es muy extensa (`> 18.000 palabras`), la divide automáticamente en varios PDFs por temas coherentes sin resumir ni omitir ningún bloque (evitando también superar el límite de tokens por minuto).
 7. **Síntesis, exportación a PDF y limpieza:**
    - Redacta el documento final en Markdown según el modo elegido (`apuntes` o `transcripcion`).
    - Convierte el Markdown a HTML y lo renderiza a `APUNTES_<tema>.pdf` o `TRANSCRIPCION_<tema>.pdf` usando Edge/Chrome en modo headless (conservando el `.md` solo si pasaste `--keep-md`).

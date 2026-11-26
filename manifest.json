@@ -1,6 +1,6 @@
 {
-  "version": "1.9.0",
-  "pipeline_sha256": "915a352992aadfaa6be986dbc1e32e9032eb5a71122ec56f33ce8548ad1acb1e",
+  "version": "1.9.1",
+  "pipeline_sha256": "5da9fa3d001bd84fc468148b8b35868b6d8fb0c85df00880a5b65c476b7968cf",
   "bat_sha256": "37121d152ca7ac7b5900190351eef88038c624088d52c95245b20a7f42e204b5",
   "req_hash": "290b402b91c112a5",
   "requirements": [
@@ -10,5 +10,5 @@
     "pypdf",
     "fpdf2"
   ],
-  "instructions_sha256": "dac6bf3ba62daa5d1d8be2288fe793aa200f44c228168866a542bae8321ac75a"
+  "instructions_sha256": "8fa477c647a032152089dd7753c55e412416d792e91f5213217194309408d4d4"
 }

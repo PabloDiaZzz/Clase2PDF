@@ -50,7 +50,7 @@ THEME = Theme(
 )
 console = Console(theme=THEME)
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 
 def _load_genai():
@@ -89,6 +89,11 @@ VOCAB_MODELS_CHAIN = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-
 TRIAGE_MODELS_CHAIN = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash")
 LARGE_PDF_PAGES = 25
 PDF_CHUNK_PAGES = 25
+MAX_CHUNK_WORDS_SANE = 18000
+LOOP_RETRY_DROPPED_WORDS = 3000
+LARGE_TRANSCRIPT_WORDS = 18000
+MAX_TOPIC_WORDS = 22000
+TRANSCRIBE_MAX_OUTPUT_TOKENS = 20000
 
 
 def natural_key(path: Path):
@@ -722,6 +727,8 @@ def _transient_reason(exc: Exception) -> str:
     if kind == "quota_daily":
         return "429 cuota diaria agotada"
     msg = f"{exc.__class__.__name__} {exc}".lower()
+    if ("429" in msg or "resource_exhausted" in msg) and "token" in msg and ("minute" in msg or "tpm" in msg):
+        return "429 limite de tokens por minuto (TPM)"
     if "429" in msg or "resource_exhausted" in msg:
         return "429 limite por minuto / cuota"
     if any(tok in msg for tok in ("503", "high demand", "overloaded", "unavailable")):
@@ -768,6 +775,20 @@ def call_with_retry(fn, label: str, delays=RETRY_DELAYS, on_status=None):
             raise
 
 
+def _config_for_model(config, model: str):
+    if config is None or model == "gemini-4-hydrogen":
+        return config
+    extra = {}
+    for attr in ("max_output_tokens", "temperature"):
+        val = getattr(config, attr, None)
+        if val is not None:
+            extra[attr] = val
+    if not extra:
+        return None
+    _, types = _load_genai()
+    return types.GenerateContentConfig(**extra)
+
+
 def generate_with_fallback(
     pool: ClientPool,
     contents,
@@ -781,7 +802,7 @@ def generate_with_fallback(
     """Prioriza mantener el mismo modelo rotando entre APIs; solo baja de modelo si todas agotan cuota."""
     last_exc = None
     for m_idx, model in enumerate(models_chain):
-        cfg = config if model == "gemini-4-hydrogen" else None
+        cfg = _config_for_model(config, model)
         candidates = pool.candidate_indices(model)
         for c_pos, key_idx in enumerate(candidates):
             client = pool.get_client(key_idx)
@@ -1572,6 +1593,200 @@ def plan_large_pdf_topics(
     )
 
 
+def _split_long_block(text: str, max_words: int) -> list[str]:
+    """Divide un bloque de transcripcion largo en partes <= max_words sin perder ninguna palabra."""
+    if len(text.split()) <= max_words:
+        return [text]
+
+    pieces: list[str] = []
+    for para in text.split("\n\n"):
+        if len(para.split()) <= max_words:
+            pieces.append(para)
+            continue
+        for line in para.splitlines():
+            words = line.split()
+            if len(words) <= max_words:
+                pieces.append(line)
+            else:
+                for i in range(0, len(words), max_words):
+                    pieces.append(" ".join(words[i:i + max_words]))
+
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_words = 0
+    for piece in pieces:
+        pw = len(piece.split())
+        if cur and cur_words + pw > max_words:
+            chunks.append("\n\n".join(cur))
+            cur = [piece]
+            cur_words = pw
+        else:
+            cur.append(piece)
+            cur_words += pw
+    if cur:
+        chunks.append("\n\n".join(cur))
+    return chunks or [text]
+
+
+def _partition_blocks_by_budget(blocks: list[str], indices: list[int], budget: int) -> list[list[int]]:
+    groups: list[list[int]] = []
+    cur: list[int] = []
+    cur_w = 0
+    for idx in indices:
+        w = len(blocks[idx - 1].split())
+        if cur and cur_w + w > budget:
+            groups.append(cur)
+            cur = [idx]
+            cur_w = w
+        else:
+            cur.append(idx)
+            cur_w += w
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def plan_transcript_topics(
+    pool: ClientPool,
+    transcripts: list[str],
+    ui: PipelineUI,
+    row_key: str = "triage",
+    fallback_title: str = "clase",
+    max_words_per_topic: int = MAX_TOPIC_WORDS,
+) -> tuple[list[dict], str, list[str]]:
+    """Agrupa bloques de transcripcion larga en varios PDFs por temas sin resumir ni omitir bloques."""
+    ui.update_row(row_key, "[accent]Dividiendo por temas...[/]", "")
+    blocks: list[str] = []
+    sub_budget = max(4000, max_words_per_topic // 2)
+    for t in transcripts:
+        if len(t.split()) > max_words_per_topic:
+            blocks.extend(_split_long_block(t, max_words=sub_budget))
+        else:
+            blocks.append(t)
+
+    n_blocks = len(blocks)
+    digest_lines: list[str] = []
+    per_block_chars = max(240, min(900, 36000 // max(1, n_blocks)))
+    for i, blk in enumerate(blocks, 1):
+        w = len(blk.split())
+        compact = re.sub(r"\s+", " ", blk).strip()
+        if len(compact) <= per_block_chars:
+            excerpt = compact
+        else:
+            part = max(80, per_block_chars // 3)
+            mid = len(compact) // 2
+            excerpt = f"{compact[:part]} [...] {compact[max(0, mid - part // 2):mid + part // 2]} [...] {compact[-part:]}"
+        digest_lines.append(f"[BLOQUE {i} ({w} palabras)] {excerpt}")
+    digest = "\n".join(digest_lines)[:36000]
+
+    prompt = (
+        f'Esta clase es muy extensa ({n_blocks} bloques).\n'
+        "Para no perder ningun detalle ni resumir contenido, dividela en 2 o mas PDFs separados por temas coherentes "
+        "(manteniendo cada PDF por debajo de unas 20.000 palabras).\n"
+        f"REGLAS ESTRICTAS:\n"
+        f"- Incluye TODOS los bloques del 1 al {n_blocks} exactamente una vez (sin omitir ni uno solo).\n"
+        '- Formato JSON estricto: {"topics": [{"title": "Tema corto descriptivo", "blocks": [1, 2]}]}\n\n'
+        f"RESUMEN DE BLOQUES:\n{digest}"
+    )
+
+    used_models: list[str] = []
+    raw_topics: list = []
+    try:
+        resp, m_name = generate_with_fallback(
+            pool,
+            prompt,
+            None,
+            "Planificando temas",
+            on_status=lambda msg: ui.update_row(row_key, msg),
+            models_chain=TRIAGE_MODELS_CHAIN,
+        )
+        used_models.append(m_name)
+        parsed = _extract_json_object(resp.text or "")
+        if parsed and isinstance(parsed.get("topics"), list):
+            raw_topics = parsed["topics"]
+    except Exception:
+        raw_topics = []
+
+    topics: list[tuple[str, list[int]]] = []
+    seen_global: set[int] = set()
+    for idx, t in enumerate(raw_topics, 1):
+        if not isinstance(t, dict):
+            continue
+        raw_b = t.get("blocks")
+        if not isinstance(raw_b, list):
+            continue
+        valid_b: list[int] = []
+        for b in raw_b:
+            if isinstance(b, int) and 1 <= b <= n_blocks and b not in seen_global:
+                seen_global.add(b)
+                valid_b.append(b)
+        if valid_b:
+            title = str(t.get("title") or f"{fallback_title} — Tema {idx}").strip()
+            topics.append((title, valid_b))
+
+    missing = [b for b in range(1, n_blocks + 1) if b not in seen_global]
+    if missing:
+        if not topics:
+            topics = [(fallback_title, list(range(1, n_blocks + 1)))]
+        else:
+            for m_idx in missing:
+                best_pos = min(
+                    range(len(topics)),
+                    key=lambda ti: min(abs(x - m_idx) for x in topics[ti][1]),
+                )
+                topics[best_pos][1].append(m_idx)
+                topics[best_pos][1].sort()
+
+    if len(topics) < 2 and n_blocks >= 2:
+        parts = _partition_blocks_by_budget(blocks, list(range(1, n_blocks + 1)), LARGE_TRANSCRIPT_WORDS)
+        if len(parts) < 2 and n_blocks >= 2:
+            mid_p = n_blocks // 2
+            parts = [list(range(1, mid_p + 1)), list(range(mid_p + 1, n_blocks + 1))]
+        topics = [(f"{fallback_title} — Parte {k}", grp) for k, grp in enumerate(parts, 1)]
+
+    jobs: list[dict] = []
+    for title, b_list in topics:
+        tot_w = sum(len(blocks[b - 1].split()) for b in b_list)
+        if tot_w > max_words_per_topic and len(b_list) > 1:
+            sub_groups = _partition_blocks_by_budget(blocks, b_list, max_words_per_topic)
+            for p_idx, grp in enumerate(sub_groups, 1):
+                jobs.append({"title": f"{title} (Parte {p_idx})", "transcripts": [blocks[b - 1] for b in grp]})
+        else:
+            jobs.append({"title": title, "transcripts": [blocks[b - 1] for b in b_list]})
+
+    return jobs, f"{len(jobs)} tema(s) por transcripcion", used_models
+
+
+def _enforce_job_transcript_budget(
+    topic_jobs: list[dict],
+    all_transcripts: list[str],
+    fallback_title: str,
+    max_words: int = MAX_TOPIC_WORDS,
+) -> list[dict]:
+    """Garantiza que ningun job supere max_words sin resumir ni perder texto."""
+    result: list[dict] = []
+    for job in topic_jobs:
+        txs = job.get("transcripts") or all_transcripts
+        total_w = sum(len(t.split()) for t in txs)
+        if total_w <= max_words:
+            out_job = dict(job)
+            out_job["transcripts"] = txs
+            result.append(out_job)
+            continue
+
+        expanded: list[str] = []
+        for t in txs:
+            expanded.extend(_split_long_block(t, max_words=max_words))
+        groups = _partition_blocks_by_budget(expanded, list(range(1, len(expanded) + 1)), max_words)
+        base_title = job.get("title") or fallback_title
+        for k, grp in enumerate(groups, 1):
+            out_job = dict(job)
+            out_job["title"] = f"{base_title} (Parte {k})" if len(groups) > 1 else base_title
+            out_job["transcripts"] = [expanded[idx - 1] for idx in grp]
+            result.append(out_job)
+    return result
+
+
 def get_duration(path: Path) -> float:
     res = subprocess.run(
         [
@@ -1807,6 +2022,99 @@ def clean_and_split_audios(
     return all_chunks, total_dur
 
 
+def _clean_repetition_loops(text: str) -> tuple[str, int]:
+    """Elimina bucles de repeticion de palabras, frases o lineas generados ante silencios."""
+    orig_words = len(text.split())
+    if not text.strip():
+        return text, 0
+
+    lines = text.splitlines()
+    norm_lines = [re.sub(r"\s+", " ", ln.strip().lower()) for ln in lines]
+    is_divider = [bool(re.match(r"^[\|\s:\-]+$", ln.strip())) for ln in lines]
+
+    # Paso 1a: colapsar lineas identicas consecutivas (>= 3 veces)
+    dedup_lines: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        nl = norm_lines[i]
+        if nl and not is_divider[i]:
+            j = i + 1
+            while j < n and norm_lines[j] == nl:
+                j += 1
+            if j - i >= 3:
+                dedup_lines.append(lines[i])
+                i = j
+                continue
+        dedup_lines.append(lines[i])
+        i += 1
+
+    # Paso 1b: colapsar bloques repetidos de 2..6 lineas consecutivas (>= 3 veces)
+    for blk_sz in range(2, 7):
+        if len(dedup_lines) < blk_sz * 3:
+            continue
+        nl_cur = [re.sub(r"\s+", " ", ln.strip().lower()) for ln in dedup_lines]
+        next_lines: list[str] = []
+        i = 0
+        m = len(dedup_lines)
+        while i < m:
+            if i + blk_sz * 3 <= m:
+                pat = nl_cur[i:i + blk_sz]
+                if any(p and not re.match(r"^[\|\s:\-]+$", p) for p in pat):
+                    reps = 1
+                    while i + (reps + 1) * blk_sz <= m and nl_cur[i + reps * blk_sz:i + (reps + 1) * blk_sz] == pat:
+                        reps += 1
+                    if reps >= 3:
+                        next_lines.extend(dedup_lines[i:i + blk_sz])
+                        i += reps * blk_sz
+                        continue
+            next_lines.append(dedup_lines[i])
+            i += 1
+        dedup_lines = next_lines
+
+    # Paso 2: colapsar bucles de palabras/frases dentro de lineas (>= 6 palabras)
+    final_lines: list[str] = []
+    for ln in dedup_lines:
+        words = ln.split()
+        if len(words) < 6:
+            final_lines.append(ln)
+            continue
+        norm = [w.strip(".,;:!?¡¿\"'()[]{}").lower() for w in words]
+        out_w: list[str] = []
+        wi = 0
+        wn = len(words)
+        while wi < wn:
+            matched = False
+            max_k = min(30, (wn - wi) // 3)
+            for k in range(1, max_k + 1):
+                if norm[wi] != norm[wi + k]:
+                    continue
+                pat = norm[wi:wi + k]
+                if not any(pat):
+                    continue
+                reps = 1
+                while wi + (reps + 1) * k <= wn and norm[wi + reps * k:wi + (reps + 1) * k] == pat:
+                    reps += 1
+                thresh = 6 if k == 1 else (4 if k <= 4 else 3)
+                if reps >= thresh:
+                    out_w.extend(words[wi:wi + k])
+                    wi += reps * k
+                    matched = True
+                    break
+            if not matched:
+                out_w.append(words[wi])
+                wi += 1
+        final_lines.append(" ".join(out_w))
+
+    cleaned = "\n".join(final_lines).strip()
+    clean_words = len(cleaned.split())
+    return cleaned, max(0, orig_words - clean_words)
+
+
+def _is_suspicious_loop(orig_words: int, dropped_words: int) -> bool:
+    return dropped_words >= LOOP_RETRY_DROPPED_WORDS or orig_words > MAX_CHUNK_WORDS_SANE
+
+
 def transcribe_chunks(
     pool: ClientPool,
     chunks: list[Path],
@@ -1820,6 +2128,7 @@ def transcribe_chunks(
     tx_dir.mkdir(exist_ok=True)
     transcripts: list[str] = []
     used_models: list[str] = []
+    vocab_note = f" Vocabulario tecnico de referencia: {', '.join(vocab[:100])}." if vocab else ""
 
     for i in range(1, len(chunks) + 1):
         lbl = "Transcripcion" if len(chunks) == 1 else f"Transcripcion ({i}/{len(chunks)})"
@@ -1840,6 +2149,51 @@ def transcribe_chunks(
             except Exception:
                 pass
 
+    def _transcribe_once(chunk_path: Path, up_item, row_key: str, idx: int, retry_anti_loop: bool = False):
+        up_idx, uploaded = up_item
+        prompt_txt = (
+            "Transcribe integramente y de forma literal este audio de clase en espanol, "
+            "manteniendo todos los detalles tecnicos sin resumir. "
+            f"No repitas palabras ni frases en bucle ante silencios o ruido; omite los silencios.{vocab_note}"
+        )
+        if retry_anti_loop:
+            prompt_txt += (
+                " IMPORTANTE: El intento anterior entro en bucle de repeticion. "
+                "Transcribe cada frase una sola vez y salta cualquier silencio o ruido de fondo."
+            )
+        cfg_kwargs: dict = {
+            "thinking_config": types.ThinkingConfig(thinking_level="LOW"),
+            "max_output_tokens": TRANSCRIBE_MAX_OUTPUT_TOKENS,
+        }
+        if retry_anti_loop:
+            cfg_kwargs["temperature"] = 0.2
+        resp, m_used = generate_with_fallback(
+            pool,
+            [prompt_txt],
+            types.GenerateContentConfig(**cfg_kwargs),
+            f"Transcripcion {idx}/{len(chunks)}",
+            on_status=lambda msg, rk=row_key: ui.update_row(rk, msg),
+            file_paths=[chunk_path],
+            preuploaded=(up_idx, [uploaded]),
+        )
+        return (resp.text or "").strip(), m_used
+
+    def _pick_better_text(clean_a: str, orig_a_w: int, drop_a: int, raw_b: str) -> str:
+        clean_b, drop_b = _clean_repetition_loops(raw_b)
+        orig_b_w = len(raw_b.split())
+        if clean_b and (
+            not _is_suspicious_loop(orig_b_w, drop_b)
+            or drop_b < drop_a
+            or len(clean_b.split()) > len(clean_a.split())
+        ):
+            return clean_b
+        return clean_a
+
+    def _save_tx(tx_file: Path, content: str):
+        tx_tmp = tx_file.with_suffix(".tmp.txt")
+        tx_tmp.write_text(content, encoding="utf-8")
+        os.replace(tx_tmp, tx_file)
+
     prefetch_fut = None
     with ThreadPoolExecutor(max_workers=1) as up_pool:
         try:
@@ -1847,7 +2201,24 @@ def transcribe_chunks(
                 row_key = f"tx_{i}"
                 tx_file = tx_dir / f"{chunk.stem}.txt"
                 if tx_file.exists():
-                    text = tx_file.read_text(encoding="utf-8")
+                    raw_cached = tx_file.read_text(encoding="utf-8")
+                    orig_w = len(raw_cached.split())
+                    clean_cached, dropped = _clean_repetition_loops(raw_cached)
+                    if _is_suspicious_loop(orig_w, dropped):
+                        ui.update_row(row_key, "[warn]Bucle en cache, reintentando...[/]", "")
+                        retry_item = _upload_and_wait(chunk, on_status=lambda msg, rk=row_key: ui.update_row(rk, msg))
+                        try:
+                            retry_raw, retry_model = _transcribe_once(chunk, retry_item, row_key, i, retry_anti_loop=True)
+                            text = _pick_better_text(clean_cached, orig_w, dropped, retry_raw)
+                            used_models.append(retry_model)
+                        finally:
+                            _delete_remote(retry_item)
+                        _save_tx(tx_file, text)
+                    else:
+                        text = clean_cached
+                        if dropped > 0:
+                            _save_tx(tx_file, text)
+
                     words = len(text.split())
                     ui.update_row(row_key, "[ok]✓ Listo[/]", f"{words:,} palabras")
                     transcripts.append(text)
@@ -1882,26 +2253,17 @@ def transcribe_chunks(
                         prefetch_fut = up_pool.submit(_upload_and_wait, next_chunk)
 
                 try:
-                    up_idx, uploaded = up_item
-                    vocab_note = f" Vocabulario tecnico de referencia: {', '.join(vocab[:100])}." if vocab else ""
-                    resp, model_used = generate_with_fallback(
-                        pool,
-                        [
-                            "Transcribe integramente y de forma literal este audio de clase en espanol, "
-                            f"manteniendo todos los detalles tecnicos sin resumir.{vocab_note}",
-                        ],
-                        types.GenerateContentConfig(
-                            thinking_config=types.ThinkingConfig(thinking_level="LOW")
-                        ),
-                        f"Transcripcion {i}/{len(chunks)}",
-                        on_status=lambda msg, rk=row_key: ui.update_row(rk, msg),
-                        file_paths=[chunk],
-                        preuploaded=(up_idx, [uploaded]),
-                    )
-                    text = (resp.text or "").strip()
-                    tx_tmp = tx_file.with_suffix(".tmp.txt")
-                    tx_tmp.write_text(text, encoding="utf-8")
-                    os.replace(tx_tmp, tx_file)
+                    raw_text, model_used = _transcribe_once(chunk, up_item, row_key, i, retry_anti_loop=False)
+                    orig_w = len(raw_text.split())
+                    clean_text, dropped = _clean_repetition_loops(raw_text)
+                    if _is_suspicious_loop(orig_w, dropped):
+                        ui.update_row(row_key, "[warn]Bucle detectado, reintentando...[/]", "")
+                        retry_raw, retry_model = _transcribe_once(chunk, up_item, row_key, i, retry_anti_loop=True)
+                        text = _pick_better_text(clean_text, orig_w, dropped, retry_raw)
+                        model_used = retry_model
+                    else:
+                        text = clean_text
+                    _save_tx(tx_file, text)
                     transcripts.append(text)
                     used_models.append(model_used)
                     words = len(text.split())
@@ -2677,6 +3039,9 @@ def main():
                 if m not in models_used:
                     models_used.append(m)
 
+            total_tx_words = sum(len(t.split()) for t in transcripts)
+            need_tx_topic_split = total_tx_words > LARGE_TRANSCRIPT_WORDS
+
             single_large_guide = output_mode == "apuntes" and len(docs) == 1 and is_large_pdf(docs[0])
             single_large_base = len(base_notes) == 1 and is_large_pdf(base_notes[0]) and not single_large_guide
 
@@ -2684,20 +3049,25 @@ def main():
             need_guide_triage = not single_large_guide and output_mode == "apuntes" and (
                 len(docs) >= 2 or any(is_large_pdf(p) for p in docs)
             )
-            has_triage = single_large_base or single_large_guide or need_base_triage or need_guide_triage
+            has_triage = single_large_base or single_large_guide or need_base_triage or need_guide_triage or need_tx_topic_split
 
             selected_base = list(base_notes)
             selected_guides = list(docs)
             topic_jobs: list[dict] = []
 
             if has_triage:
-                ui.add_row("triage", "Filtrando apuntes")
+                triage_label = (
+                    "Dividiendo por temas"
+                    if (single_large_base or single_large_guide or need_tx_topic_split)
+                    else "Filtrando apuntes"
+                )
+                ui.add_row("triage", triage_label)
             ui.add_row("review", "Revision")
             ui.add_row("pdf", "PDF")
 
             final_tasks = 2 + (1 if has_triage else 0)
             ui.set_progress(
-                description=f"Paso {3 + step_off}/{total_steps} · {'Filtrando apuntes...' if has_triage else 'Revisando...'}",
+                description=f"Paso {3 + step_off}/{total_steps} · {'Dividiendo por temas...' if has_triage else 'Revisando...'}",
                 total=final_tasks,
                 completed=0,
             )
@@ -2745,6 +3115,29 @@ def main():
                         for m in g_models:
                             if m not in models_used:
                                 models_used.append(m)
+                if not topic_jobs and need_tx_topic_split:
+                    tx_jobs, tx_info, tx_m = plan_transcript_topics(
+                        pool,
+                        transcripts,
+                        ui,
+                        row_key="triage",
+                        fallback_title=root_dir.name if root_dir.name else "clase",
+                    )
+                    for j in tx_jobs:
+                        topic_jobs.append(
+                            {
+                                "base": selected_base,
+                                "guides": selected_guides,
+                                "style_only": False,
+                                "title": j["title"],
+                                "transcripts": j["transcripts"],
+                            }
+                        )
+                    if tx_info:
+                        triage_infos.append(tx_info)
+                    for m in tx_m:
+                        if m not in models_used:
+                            models_used.append(m)
                 ui.update_row("triage", "[ok]✓ Listo[/]", "; ".join(triage_infos))
                 ui.set_progress(description=f"Paso {3 + step_off}/{total_steps} · Revisando...", advance=1)
 
@@ -2752,6 +3145,7 @@ def main():
                 topic_jobs = [{"base": selected_base, "guides": selected_guides, "style_only": False, "title": None}]
 
             fallback_name = root_dir.name if root_dir.name else "clase"
+            topic_jobs = _enforce_job_transcript_budget(topic_jobs, transcripts, fallback_name)
             out_prefix = TRANSCRIPT_PREFIX if output_mode == "transcripcion" else OUTPUT_PREFIX
             generated_pdfs: list[Path] = []
 
@@ -2760,7 +3154,7 @@ def main():
                     ui.update_row("review", f"[accent]Tema {j_idx}/{len(topic_jobs)}...[/]", "")
                 md_text, rev_model = synthesize_notes(
                     pool,
-                    transcripts,
+                    job.get("transcripts") or transcripts,
                     vocab,
                     job["title"] or fallback_name,
                     ui,
@@ -2863,11 +3257,12 @@ def main():
             sys.exit(EXIT_AUTH)
         if _classify_error(exc) in ("transient", "server_busy", "quota_daily"):
             reason = _transient_reason(exc)
-            fix_msg = (
-                "Añade otra clave con --add-api o espera al reinicio de cuota (el progreso guardado se reutiliza)."
-                if reason.startswith("429")
-                else "Espera unos minutos y vuelve a ejecutar (el progreso guardado se reutiliza)."
-            )
+            if reason.startswith("429 limite de tokens"):
+                fix_msg = "La peticion supero el limite de tokens/minuto (TPM). Espera 1 minuto o divide los audios (el progreso guardado se reutiliza)."
+            elif reason.startswith("429"):
+                fix_msg = "Añade otra clave con --add-api o espera al reinicio de cuota (el progreso guardado se reutiliza)."
+            else:
+                fix_msg = "Espera unos minutos y vuelve a ejecutar (el progreso guardado se reutiliza)."
             emit_error(
                 _CLIError(
                     code="API_UNAVAILABLE",
