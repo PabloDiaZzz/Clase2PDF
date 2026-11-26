@@ -17,12 +17,13 @@ venv/
 *.key
 *.pem
 
-# Documents & generated notes (keep README.md contracts)
+# Documents & generated notes (keep README.md and INSTRUCCIONES.md)
 *.pdf
 *.docx
 *.doc
 *.md
 !README.md
+!INSTRUCCIONES.md
 
 # Audio / video / archives
 *.mp3

@@ -28,6 +28,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "  if ((Get-Sha $tmp) -ne $m.pipeline_sha256.ToLowerInvariant()) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw 'SHA-256 mismatch en pipeline.py' };" ^
     "  Move-Item -LiteralPath $tmp -Destination $pyDst -Force; Set-Content -LiteralPath (Join-Path $rt '.pipe_hash') -Value $m.pipeline_sha256.Substring(0,16) -Encoding ASCII" ^
     "};" ^
+    "if ($m.instructions_sha256) {" ^
+    "  try {" ^
+    "    $batDir=Split-Path $bat -Parent; $insDst=Join-Path $batDir 'INSTRUCCIONES.md'; $icur=''; if (Test-Path -LiteralPath $insDst) { $icur=Get-Sha $insDst };" ^
+    "    if ($icur -ne $m.instructions_sha256.ToLowerInvariant()) {" ^
+    "      $itmp=Join-Path $rt 'INSTRUCCIONES.md.tmp'; Invoke-WebRequest -Uri ($base+'/INSTRUCCIONES.md?t='+$ts) -OutFile $itmp -TimeoutSec 15 -UseBasicParsing;" ^
+    "      if ((Get-Sha $itmp) -eq $m.instructions_sha256.ToLowerInvariant()) { Move-Item -LiteralPath $itmp -Destination $insDst -Force } else { Remove-Item $itmp -Force -ErrorAction SilentlyContinue }" ^
+    "    }" ^
+    "  } catch {}" ^
+    "};" ^
     "if ($env:CLASE2PDF_BAT_REEXEC -ne '1' -and $m.bat_sha256) {" ^
     "  $bcur=Get-Sha $bat; if ($bcur -ne $m.bat_sha256.ToLowerInvariant()) {" ^
     "    $btmp=Join-Path $rt 'procesar_clase_new.bat'; Invoke-WebRequest -Uri ($base+'/procesar_clase.bat?t='+$ts) -OutFile $btmp -TimeoutSec 15 -UseBasicParsing;" ^

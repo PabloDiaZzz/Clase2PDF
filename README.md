@@ -6,7 +6,7 @@ Self-updating Windows CLI tool (`procesar_clase.bat` + `pipeline.py`) that clean
 ## Local Interface & Invariants
 - **Bootstrapper (`procesar_clase.bat`)**:
   - Env overrides: `CLASE2PDF_REPO_URL` (default `https://raw.githubusercontent.com/PabloDiaZzz/Clase2PDF/main`), `CLASE2PDF_NO_UPDATE=1`, `CLASE2PDF_BAT_REEXEC=1`, `LOCALAPPDATA`.
-  - Downloads and SHA-256-verifies `manifest.json`, `pipeline.py`, and `procesar_clase.bat` before execution; falls back to cached `%LOCALAPPDATA%\Clase2PDF\pipeline.py` when offline.
+  - Downloads and SHA-256-verifies `manifest.json`, `pipeline.py`, `procesar_clase.bat`, and (non-blocking into the `.bat` folder) `INSTRUCCIONES.md` before execution; falls back to cached `%LOCALAPPDATA%\Clase2PDF\pipeline.py` when offline.
   - Installs missing `ffmpeg` / `Python 3.12` via `winget` (checks `where winget`) and provisions `%LOCALAPPDATA%\Clase2PDF\venv`.
 - **CLI Entrypoint (`pipeline.py:main`, `pipeline.py:build_parser`)**:
   - Flags: `carpeta` (positional, default cwd), `--version` (`1.9.0`), `--mode {transcripcion,apuntes}`, `--keep-md`, `--apis`, `--add-api`, `--reset-key`, `--dry-run`, `--json`, `-q/--quiet`, `--no-clear`, `--debug`.

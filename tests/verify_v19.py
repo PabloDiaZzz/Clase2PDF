@@ -114,7 +114,7 @@ try:
     # 5. End-to-end auto-updater test via local http.server (download + SHA-256 + offline fallback)
     srv_dir = tmp_root / "srv"
     srv_dir.mkdir()
-    for fn in ("pipeline.py", "procesar_clase.bat", "manifest.json"):
+    for fn in ("pipeline.py", "procesar_clase.bat", "manifest.json", "INSTRUCCIONES.md"):
         shutil.copyfile(REPO_ROOT / fn, srv_dir / fn)
 
     handler = partial(_QuietHandler, directory=str(srv_dir))
@@ -145,6 +145,7 @@ try:
         assert r_up.returncode == 0, f"Auto-update failed: {r_up.returncode} {r_up.stdout} {r_up.stderr}"
         assert "Clase2PDF 1.9.0" in r_up.stdout
         assert (rt_dir / "pipeline.py").exists() and (rt_dir / ".pipe_hash").exists()
+        assert (tmp_root / "INSTRUCCIONES.md").exists() and not (rt_dir / "INSTRUCCIONES.md").exists()
     finally:
         httpd.shutdown()
         httpd.server_close()

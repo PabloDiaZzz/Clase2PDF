@@ -22,6 +22,7 @@ def main():
     repo_root = Path(__file__).resolve().parent.parent
     pipeline_path = repo_root / "pipeline.py"
     bat_path = repo_root / "procesar_clase.bat"
+    ins_path = repo_root / "INSTRUCCIONES.md"
 
     # Normalizar finales de linea para coincidir 100% con .gitattributes
     pipeline_bytes = pipeline_path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
@@ -29,6 +30,12 @@ def main():
 
     bat_text = bat_path.read_text(encoding="ascii").replace("\r\n", "\n").replace("\n", "\r\n")
     bat_path.write_bytes(bat_text.encode("ascii"))
+
+    ins_sha = ""
+    if ins_path.exists():
+        ins_bytes = ins_path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+        ins_path.write_bytes(ins_bytes)
+        ins_sha = _sha256_hex(ins_path)
 
     pipe_sha = _sha256_hex(pipeline_path)
     bat_sha = _sha256_hex(bat_path)
@@ -41,6 +48,8 @@ def main():
         "req_hash": req_hash,
         "requirements": REQUIREMENTS,
     }
+    if ins_sha:
+        manifest["instructions_sha256"] = ins_sha
     manifest_path = repo_root / "manifest.json"
     manifest_path.write_bytes((json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
 
@@ -48,6 +57,8 @@ def main():
     onedrive_bat = Path(r"C:\Users\pablo\OneDrive\Desktop\Clase2PDF\procesar_clase.bat")
     if onedrive_bat.parent.exists():
         shutil.copyfile(bat_path, onedrive_bat)
+        if ins_path.exists():
+            shutil.copyfile(ins_path, onedrive_bat.parent / "INSTRUCCIONES.md")
 
     local_rt = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Clase2PDF"
     local_rt.mkdir(parents=True, exist_ok=True)
