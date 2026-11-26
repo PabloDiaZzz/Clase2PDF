@@ -5,7 +5,7 @@ import re
 import shutil
 from pathlib import Path
 
-REQUIREMENTS = ["google-genai", "rich", "questionary", "pypdf"]
+REQUIREMENTS = ["google-genai", "rich", "questionary", "pypdf", "fpdf2"]
 
 
 def _sha256_hex(path: Path) -> str:

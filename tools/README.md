@@ -4,7 +4,7 @@
 Build and release tooling for `Clase2PDF`. Normalizes line endings, computes SHA-256 digests for `pipeline.py`, `procesar_clase.bat`, and Python package requirements, writes the root `manifest.json`, and synchronizes local runtime/OneDrive copies.
 
 ## Interface
-- `build_manifest.py:REQUIREMENTS` — Ordered list of required pip packages (`["google-genai", "rich", "questionary", "pypdf"]`).
+- `build_manifest.py:REQUIREMENTS` — Ordered list of required pip packages (`["google-genai", "rich", "questionary", "pypdf", "fpdf2"]`).
 - `build_manifest.py:_sha256_hex(path: Path) -> str` — Computes lowercase SHA-256 digest of a target file.
 - `build_manifest.py:_extract_version(pipeline_path: Path) -> str` — Extracts `APP_VERSION` from `../pipeline.py`.
 - `build_manifest.py:main()` — Normalizes line endings (`pipeline.py` and `INSTRUCCIONES.md` to LF, `procesar_clase.bat` to CRLF), writes `../manifest.json`, and syncs `procesar_clase.bat`, `INSTRUCCIONES.md`, and `pipeline.py` to local runtime/OneDrive paths.

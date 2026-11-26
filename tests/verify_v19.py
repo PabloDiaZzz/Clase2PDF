@@ -111,6 +111,20 @@ try:
     p2 = pipeline.inspect_pdf_pages(pdf_p)
     assert p1 is p2
 
+    # 4b. fpdf2 fallback when Edge/Chrome is unavailable
+    orig_fb = pipeline.find_browser
+    try:
+        def _no_browser():
+            raise FileNotFoundError("no browser")
+        pipeline.find_browser = _no_browser
+        fb_pdf = tmp_root / "fallback_fpdf2.pdf"
+        pipeline.export_pdf("# Tema Prueba\n\nTexto con acentos: camión, pingüino.\n\n- Punto uno\n", tmp_root, fb_pdf)
+        assert fb_pdf.exists() and fb_pdf.stat().st_size > 500
+        rd_fb = pypdf.PdfReader(str(fb_pdf))
+        assert len(rd_fb.pages) >= 1
+    finally:
+        pipeline.find_browser = orig_fb
+
     # 5. End-to-end auto-updater test via local http.server (download + SHA-256 + offline fallback)
     srv_dir = tmp_root / "srv"
     srv_dir.mkdir()

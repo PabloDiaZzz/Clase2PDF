@@ -2207,6 +2207,49 @@ def find_browser() -> str:
     raise FileNotFoundError("No se encontro Edge ni Chrome para exportar a PDF.")
 
 
+def _export_pdf_fpdf2(body_html: str, md_text: str, pdf_path: Path):
+    """Fallback puro Python con fpdf2 cuando Edge/Chrome no estan disponibles."""
+    from fpdf import FPDF
+
+    pdf = FPDF(format="A4")
+    pdf.set_margins(18, 18, 18)
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    reg = fonts_dir / "segoeui.ttf"
+    if not reg.exists():
+        reg = fonts_dir / "arial.ttf"
+    if reg.exists():
+        family = "SysFont"
+        pdf.add_font(family, "", str(reg))
+        bold = fonts_dir / ("segoeuib.ttf" if reg.name == "segoeui.ttf" else "arialbd.ttf")
+        ital = fonts_dir / ("segoeuii.ttf" if reg.name == "segoeui.ttf" else "ariali.ttf")
+        pdf.add_font(family, "B", str(bold if bold.exists() else reg))
+        pdf.add_font(family, "I", str(ital if ital.exists() else reg))
+        pdf.set_font(family, size=10.5)
+        unicode_ok = True
+    else:
+        pdf.set_font("Helvetica", size=10.5)
+        unicode_ok = False
+
+    safe_html = re.sub(r"<span[^>]*>(.*?)</span>", r"<i>\1</i>", body_html, flags=re.DOTALL)
+    if not unicode_ok:
+        safe_html = safe_html.encode("latin-1", "replace").decode("latin-1")
+    try:
+        pdf.write_html(safe_html)
+    except Exception:
+        txt = md_text if unicode_ok else md_text.encode("latin-1", "replace").decode("latin-1")
+        pdf.multi_cell(0, 6, txt)
+
+    tmp_pdf = pdf_path.with_suffix(".tmp.pdf")
+    try:
+        pdf.output(str(tmp_pdf))
+        tmp_pdf.replace(pdf_path)
+    finally:
+        tmp_pdf.unlink(missing_ok=True)
+
+
 def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
     html_path = pipe_dir / "doc.html"
     body = md_to_html(md_text)
@@ -2235,21 +2278,33 @@ def export_pdf(md_text: str, pipe_dir: Path, pdf_path: Path):
 <body>{body}</body>
 </html>"""
     html_path.write_text(doc, encoding="utf-8")
-    browser = find_browser()
-    res = subprocess.run(
-        [
-            browser,
-            "--headless=new",
-            "--disable-gpu",
-            "--no-pdf-header-footer",
-            f"--print-to-pdf={pdf_path}",
-            html_path.as_uri(),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if res.returncode != 0:
-        raise RuntimeError(f"Error exportando PDF ({res.returncode}): {res.stderr.strip()}")
+    browser_err: Exception | None = None
+    try:
+        browser = find_browser()
+        res = subprocess.run(
+            [
+                browser,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-pdf-header-footer",
+                f"--print-to-pdf={pdf_path}",
+                html_path.as_uri(),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0 and pdf_path.exists():
+            return
+        browser_err = RuntimeError(f"Error exportando PDF ({res.returncode}): {res.stderr.strip()}")
+    except FileNotFoundError as exc:
+        browser_err = exc
+
+    try:
+        _export_pdf_fpdf2(body, md_text, pdf_path)
+    except Exception:
+        if browser_err is not None:
+            raise browser_err
+        raise
 
 
 def derive_subject_slug(md_text: str, fallback: str) -> str:

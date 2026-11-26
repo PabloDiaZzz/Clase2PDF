@@ -31,7 +31,7 @@ Self-updating Windows CLI tool (`procesar_clase.bat` + `pipeline.py`) that clean
 ## Global Side Effects
 - Network requests to GitHub Raw (`manifest.json`, `pipeline.py`, `procesar_clase.bat`) and Google Gemini API (`v1beta`).
 - Local filesystem writes in `%LOCALAPPDATA%\Clase2PDF\` and transient `.clase_pipeline\` in the target class folder, plus output PDFs (`APUNTES_*.pdf`, `TRANSCRIPCION_*.pdf`) and optional `.md` files.
-- Headless Edge/Chrome process invocation for HTML-to-PDF rendering.
+- Headless Edge/Chrome process invocation for HTML-to-PDF rendering (with pure-Python `fpdf2` fallback when neither browser is installed).
 
 ## System Verification
 - Run: `python tests/verify_all.py && python tests/verify_rich_ui.py && python tests/verify_cli_contract.py && python tests/verify_v13.py && python tests/verify_v19.py`

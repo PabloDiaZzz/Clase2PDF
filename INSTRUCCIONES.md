@@ -24,7 +24,7 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 ## Requisitos y primera ejecución
 
 - **Sistema operativo:** Windows 10 u 11.
-- **Navegador:** Microsoft Edge (incluido en Windows) o Google Chrome (necesario para generar el PDF final).
+- **Navegador:** Microsoft Edge (incluido en Windows) o Google Chrome para maquetado avanzado (si no hay ninguno, usa `fpdf2` como respaldo automático).
 - **Conexión a Internet:** necesaria en la primera ejecución para descargar `pipeline.py`, dependencias y validar tu API Key.
 - **API Key de Google Gemini:** gratuita desde [Google AI Studio](https://aistudio.google.com/apikey) (empieza por `AQ.`).
 
@@ -225,7 +225,7 @@ procesar_clase.bat
 | :--- | :--- | :--- |
 | `INVALID_FOLDER` | La ruta pasada no existe o no es una carpeta válida. | Revisa la ruta entre comillas, por ejemplo: `procesar_clase.bat "C:\ruta\clase"`. |
 | `NO_AUDIOS` | No hay archivos de audio/vídeo compatibles en la carpeta. | Asegúrate de ejecutar el `.bat` dentro de la carpeta con los audios (`.mp3`, `.m4a`, `.wav`, `.mp4`, etc.) o arrastrar la carpeta encima. |
-| `BROWSER_NOT_FOUND` | No se encontró Microsoft Edge ni Google Chrome para imprimir el PDF. | Instala Microsoft Edge o Google Chrome; como alternativa inmediata puedes usar `--keep-md` para conservar el Markdown. |
+| `BROWSER_NOT_FOUND` | No se encontró Microsoft Edge ni Google Chrome y también falló el respaldo `fpdf2`. | Instala Microsoft Edge o Google Chrome, o borra `%LOCALAPPDATA%\Clase2PDF\venv` para reinstalar `fpdf2`; como alternativa usa `--keep-md`. |
 | `UNEXPECTED_ERROR` *(código 1)* | Error interno no previsto. | Revisa el detalle técnico en `%LOCALAPPDATA%\Clase2PDF\last_error.log`. |
 
 > [!TIP]
