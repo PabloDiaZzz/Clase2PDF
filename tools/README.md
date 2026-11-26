@@ -10,7 +10,7 @@ Build and release tooling for `Clase2PDF`. Normalizes line endings, computes SHA
 - `build_manifest.py:main()` — Normalizes line endings (`pipeline.py` and `INSTRUCCIONES.md` to LF, `procesar_clase.bat` to CRLF), writes `../manifest.json`, and syncs `procesar_clase.bat`, `INSTRUCCIONES.md`, and `pipeline.py` to local runtime/OneDrive paths.
 
 ## Invariants
-- `pipeline.py` and `INSTRUCCIONES.md` MUST use LF (`\n`) and `procesar_clase.bat` MUST use CRLF (`\r\n`) before hashing so local SHA-256 values in `manifest.json` match `.gitattributes` and GitHub Raw downloads byte-for-byte.
+- `pipeline.py` and `INSTRUCCIONES.md` MUST use LF (`\n`) and `procesar_clase.bat` MUST use CRLF (`\r\n`, tracked as `-text` in `.gitattributes`) before hashing so local SHA-256 values in `manifest.json` match GitHub Raw downloads byte-for-byte.
 - `manifest.json` MUST contain `version`, `pipeline_sha256`, `bat_sha256`, `req_hash`, `requirements`, and (when `INSTRUCCIONES.md` exists) `instructions_sha256`.
 
 ## Side Effects
