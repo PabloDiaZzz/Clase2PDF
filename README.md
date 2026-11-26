@@ -9,7 +9,7 @@ Self-updating Windows CLI tool (`procesar_clase.bat` + `pipeline.py`) that clean
   - Downloads and SHA-256-verifies `manifest.json`, `pipeline.py`, `procesar_clase.bat`, and (non-blocking into the `.bat` folder) `INSTRUCCIONES.md` before execution; falls back to cached `%LOCALAPPDATA%\Clase2PDF\pipeline.py` when offline.
   - Installs missing `ffmpeg` / `Python 3.12` via `winget` (checks `where winget`) and provisions `%LOCALAPPDATA%\Clase2PDF\venv`.
 - **CLI Entrypoint (`pipeline.py:main`, `pipeline.py:build_parser`)**:
-  - Flags: `carpeta` (positional, default cwd), `--version` (`1.9.3`), `--mode {transcripcion,apuntes}`, `--keep-md`, `--apis`, `--add-api`, `--reset-key`, `--dry-run`, `--json`, `-q/--quiet`, `--no-clear`, `--debug`.
+  - Flags: `carpeta` (positional, default cwd), `--version` (`1.9.4`), `--mode {transcripcion,apuntes}`, `--keep-md`, `--apis`, `--add-api`, `--reset-key`, `--dry-run`, `--json`, `-q/--quiet`, `--no-clear`, `--debug`.
   - Exit codes: `EXIT_OK=0`, `EXIT_ERROR=1`, `EXIT_USAGE=2`, `EXIT_NOT_FOUND=3`, `EXIT_AUTH=4`, `EXIT_TRANSIENT=75`, `EXIT_CONFIG=78`, `EXIT_CANCELLED=130`.
 - **Key Components (`pipeline.py`)**:
   - `ClientPool`, `get_or_prompt_api_keys`, `add_api_key_flow`, `manage_api_keys_menu`, `test_api_key` — Thread-safe Windows DPAPI multi-key storage (`api_key.dpapi`, `api_key_<N>.dpapi`), individual key deletion, sticky/preferred-key concurrent multi-API dispatch, and fast rotation on `429` (`rate_limit`/`quota_daily`)/auth vs immediate model fallback on `503` (`server_busy`, skipping `gemma-*` for file inputs).

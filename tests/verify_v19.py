@@ -157,7 +157,7 @@ try:
     try:
         r_up = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
         assert r_up.returncode == 0, f"Auto-update failed: {r_up.returncode} {r_up.stdout} {r_up.stderr}"
-        assert "Clase2PDF 1.9.3" in r_up.stdout
+        assert "Clase2PDF 1.9.4" in r_up.stdout
         assert (rt_dir / "pipeline.py").exists() and (rt_dir / ".pipe_hash").exists()
         assert (tmp_root / "INSTRUCCIONES.md").exists() and not (rt_dir / "INSTRUCCIONES.md").exists()
     finally:
@@ -166,7 +166,7 @@ try:
 
     # Offline fallback after server stopped (pipeline.py already cached)
     r_off = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
-    assert r_off.returncode == 0 and "Clase2PDF 1.9.3" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
+    assert r_off.returncode == 0 and "Clase2PDF 1.9.4" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
 
     # 6. v1.9.1: repetition-loop cleaner
     w_loop = "Inicio de clase. " + ("silencio " * 12) + "Fin."
@@ -355,6 +355,47 @@ try:
         pool_gemma, "hola", None, "GemmaFile", file_paths=[c_a], models_chain=("gemma-4-31b-it", "gemini-3.8-flash")
     )
     assert gm_file == "gemini-3.8-flash" and gemma_calls == ["gemini-3.8-flash"], gemma_calls
+
+    # 19. v1.9.4 (BUG-001): _upload_and_wait rotates away from invalid API2 (401) to API1
+    up401_dir = tmp_root / "up401"
+    (up401_dir / "transcripts").mkdir(parents=True, exist_ok=True)
+    u1, u2 = up401_dir / "u1.mp3", up401_dir / "u2.mp3"
+    u1.write_bytes(b"1"); u2.write_bytes(b"2")
+    class _BadUpFiles:
+        def upload(self, **kw): raise RuntimeError("401 API_KEY_INVALID")
+        def delete(self, **kw): pass
+    pool_up401 = pipeline.ClientPool(
+        [(1, "AIzaSyKeyOne000000001"), (2, "AIzaSyKeyBad000000002")],
+        client_factory=lambda k: type("C", (), {
+            "models": _ConcModels("API1" if "One" in k else "API2"),
+            "files": _ConcFiles() if "One" in k else _BadUpFiles(),
+        })(),
+    )
+    out_u401, _ = pipeline.transcribe_chunks(pool_up401, [u1, u2], [], up401_dir, ui)
+    assert out_u401 == ["ok_API1", "ok_API1"] and 1 in pool_up401.invalid_keys
+
+    # 20. v1.9.4 (BUG-002 & BUG-005): plan_transcript_topics splits single 20k-word block & hits plan cache
+    plan_dir = tmp_root / "plan_cache_dir"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    plan_calls = []
+    orig_gwf5 = pipeline.generate_with_fallback
+    try:
+        def _fake_gwf_plan(*a, **kw):
+            plan_calls.append(1)
+            return type("R", (), {"text": '{"topics": [{"title": "Parte A", "blocks": [1]}, {"title": "Parte B", "blocks": [2]}]}'})(), "gemini-3.6-flash"
+        pipeline.generate_with_fallback = _fake_gwf_plan
+        j1, _, _ = pipeline.plan_transcript_topics(pool_429, ["palabra " * 20000], ui, pipe_dir=plan_dir)
+        assert len(j1) >= 2 and sum(len(t.split()) for j in j1 for t in j["transcripts"]) == 20000
+        assert len(plan_calls) == 1
+        j2, _, _ = pipeline.plan_transcript_topics(pool_429, ["palabra " * 20000], ui, pipe_dir=plan_dir)
+        assert j2 == j1 and len(plan_calls) == 1
+    finally:
+        pipeline.generate_with_fallback = orig_gwf5
+
+    # 21. v1.9.4 (BUG-004): _clean_repetition_loops preserves real large numbers (1000000000000)
+    num_sentence = "El presupuesto es de 1000000000000 euros en total."
+    num_clean, num_drop = pipeline._clean_repetition_loops(num_sentence)
+    assert num_clean == num_sentence and num_drop == 0, (num_clean, num_drop)
 
     # Remove junction safely before rmtree
     subprocess.run(["cmd", "/c", "rmdir", str(rt_dir / "venv")], check=True, capture_output=True)

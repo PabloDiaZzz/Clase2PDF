@@ -50,7 +50,7 @@ THEME = Theme(
 )
 console = Console(theme=THEME)
 
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 
 
 def _load_genai():
@@ -1686,14 +1686,38 @@ def plan_transcript_topics(
     row_key: str = "triage",
     fallback_title: str = "clase",
     max_words_per_topic: int = MAX_TOPIC_WORDS,
+    pipe_dir: Path | None = None,
 ) -> tuple[list[dict], str, list[str]]:
     """Agrupa bloques de transcripcion larga en varios PDFs por temas sin resumir ni omitir bloques."""
+    plan_cache: Path | None = None
+    if pipe_dir is not None:
+        plan_sig = hashlib.sha256(
+            json.dumps(
+                {"tx": transcripts, "max_w": max_words_per_topic, "fb": fallback_title},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        plan_cache = pipe_dir / "topics" / f"plan_{plan_sig}.json"
+        if plan_cache.exists():
+            try:
+                cached = json.loads(plan_cache.read_text(encoding="utf-8"))
+                c_jobs = cached.get("jobs") if isinstance(cached, dict) else None
+                if (
+                    isinstance(c_jobs, list)
+                    and c_jobs
+                    and all(isinstance(j, dict) and isinstance(j.get("transcripts"), list) and "title" in j for j in c_jobs)
+                ):
+                    return c_jobs, cached.get("info", f"{len(c_jobs)} tema(s) por transcripcion"), []
+            except Exception:
+                pass
+
     ui.update_row(row_key, "[accent]Dividiendo por temas...[/]", "")
     blocks: list[str] = []
     sub_budget = max(4000, max_words_per_topic // 2)
     for t in transcripts:
-        if len(t.split()) > max_words_per_topic:
-            blocks.extend(_split_long_block(t, max_words=sub_budget))
+        w_t = len(t.split())
+        if w_t > max_words_per_topic or (len(transcripts) == 1 and w_t > LARGE_TRANSCRIPT_WORDS):
+            blocks.extend(_split_long_block(t, max_words=min(sub_budget, max(4000, w_t // 2))))
         else:
             blocks.append(t)
 
@@ -1787,7 +1811,16 @@ def plan_transcript_topics(
         else:
             jobs.append({"title": title, "transcripts": [blocks[b - 1] for b in b_list]})
 
-    return jobs, f"{len(jobs)} tema(s) por transcripcion", used_models
+    info_txt = f"{len(jobs)} tema(s) por transcripcion"
+    if plan_cache is not None and jobs:
+        try:
+            plan_cache.parent.mkdir(parents=True, exist_ok=True)
+            p_tmp = plan_cache.with_suffix(".tmp.json")
+            p_tmp.write_text(json.dumps({"jobs": jobs, "info": info_txt}, ensure_ascii=False), encoding="utf-8")
+            os.replace(p_tmp, plan_cache)
+        except OSError:
+            pass
+    return jobs, info_txt, used_models
 
 
 def _enforce_job_transcript_budget(
@@ -2068,7 +2101,8 @@ def _clean_repetition_loops(text: str) -> tuple[str, int]:
     if not text.strip():
         return text, 0
 
-    text_work = re.sub(r"([^\s\-|=*_])\1{11,}", r"\1\1\1", text)
+    text_work = re.sub(r"([^\s\-|=*_\d])\1{11,}", r"\1\1\1", text)
+    text_work = re.sub(r"(\d)\1{29,}", r"\1\1\1", text_work)
     text_work = re.sub(r"((?:[^\s\-|=*_][^\n]{1,24}?))\1{7,}", r"\1", text_work)
 
     lines = text_work.splitlines()
@@ -2188,10 +2222,27 @@ def transcribe_chunks(
     ui.set_progress(description=f"{step_label} · Transcribiendo...", total=len(chunks), completed=0)
 
     def _upload_and_wait(path: Path, on_status=None, key_idx: int | None = None):
-        up_idx = (key_idx % pool.size) if key_idx is not None else pool.current_idx
-        c = pool.get_client(up_idx)
-        f = _upload_local_file(c, path, on_status=on_status)
-        return up_idx, wait_file_active(c, f, on_status=on_status)
+        candidates = pool.candidate_indices(MODELS_CHAIN[0], preferred_idx=key_idx)
+        if not candidates:
+            candidates = [(key_idx % pool.size) if key_idx is not None else pool.current_idx]
+        last_exc: Exception | None = None
+        for pos, up_idx in enumerate(candidates):
+            c = pool.get_client(up_idx)
+            try:
+                f = _upload_local_file(c, path, on_status=on_status)
+                return up_idx, wait_file_active(c, f, on_status=on_status)
+            except Exception as exc:
+                last_exc = exc
+                kind = _classify_error(exc)
+                if kind == "auth_error":
+                    pool.mark_invalid(up_idx)
+                    if pos + 1 < len(candidates):
+                        continue
+                elif kind in ("quota_daily", "rate_limit") and pos + 1 < len(candidates):
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
 
     def _delete_remote(item):
         if item is not None:
@@ -2522,6 +2573,7 @@ NUEVA TRANSCRIPCION:
     _, types = _load_genai()
     call_contents = [*docx_texts, prompt] if docx_texts else prompt
     status_cb = on_status or (lambda msg: ui.update_row("review", msg))
+    extra_kw = {"preferred_key_idx": preferred_key_idx} if preferred_key_idx is not None else {}
     resp, used_model = generate_with_fallback(
         pool,
         call_contents,
@@ -2531,7 +2583,7 @@ NUEVA TRANSCRIPCION:
         "Revision",
         on_status=status_cb,
         file_paths=upload_paths or None,
-        preferred_key_idx=preferred_key_idx,
+        **extra_kw,
     )
     md_text = strip_markdown_fences(resp.text or "")
     if not md_text.strip():
@@ -3213,6 +3265,24 @@ def main():
 
             if has_triage:
                 triage_infos: list[str] = []
+                if need_base_triage:
+                    selected_base, b_info, b_models = select_and_slice_docs(
+                        pool, base_notes, transcripts, pipe_dir, ui, row_key="triage"
+                    )
+                    if b_info:
+                        triage_infos.append(b_info)
+                    for m in b_models:
+                        if m not in models_used:
+                            models_used.append(m)
+                if need_guide_triage:
+                    selected_guides, g_info, g_models = select_and_slice_docs(
+                        pool, docs, transcripts, pipe_dir, ui, row_key="triage"
+                    )
+                    if g_info:
+                        triage_infos.append(g_info)
+                    for m in g_models:
+                        if m not in models_used:
+                            models_used.append(m)
                 if single_large_base:
                     jobs, b_info, b_models = plan_large_pdf_topics(
                         pool, base_notes[0], transcripts, pipe_dir, ui, row_key="triage"
@@ -3235,25 +3305,6 @@ def main():
                     for m in g_models:
                         if m not in models_used:
                             models_used.append(m)
-                else:
-                    if need_base_triage:
-                        selected_base, b_info, b_models = select_and_slice_docs(
-                            pool, base_notes, transcripts, pipe_dir, ui, row_key="triage"
-                        )
-                        if b_info:
-                            triage_infos.append(b_info)
-                        for m in b_models:
-                            if m not in models_used:
-                                models_used.append(m)
-                    if need_guide_triage:
-                        selected_guides, g_info, g_models = select_and_slice_docs(
-                            pool, docs, transcripts, pipe_dir, ui, row_key="triage"
-                        )
-                        if g_info:
-                            triage_infos.append(g_info)
-                        for m in g_models:
-                            if m not in models_used:
-                                models_used.append(m)
                 if not topic_jobs and need_tx_topic_split:
                     tx_jobs, tx_info, tx_m = plan_transcript_topics(
                         pool,
@@ -3261,6 +3312,7 @@ def main():
                         ui,
                         row_key="triage",
                         fallback_title=root_dir.name if root_dir.name else "clase",
+                        pipe_dir=pipe_dir,
                     )
                     for j in tx_jobs:
                         topic_jobs.append(
@@ -3293,13 +3345,23 @@ def main():
 
             for j_idx, job in enumerate(topic_jobs, 1):
                 job_txs = job.get("transcripts") or transcripts
+                file_sigs = []
+                slices_root = (pipe_dir / "slices").resolve()
+                for p in (job["base"] + job["guides"]):
+                    if not p.exists():
+                        continue
+                    if p.resolve().parent == slices_root:
+                        file_sigs.append((p.name, hashlib.sha256(p.read_bytes()).hexdigest()[:16]))
+                    else:
+                        st_p = p.stat()
+                        file_sigs.append((p.name, st_p.st_mtime_ns, st_p.st_size))
                 sig_payload = json.dumps(
                     {
                         "mode": output_mode,
                         "title": job.get("title"),
                         "style_only": job["style_only"],
                         "tx": job_txs,
-                        "files": [(p.name, p.stat().st_mtime_ns) for p in (job["base"] + job["guides"]) if p.exists()],
+                        "files": file_sigs,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -3467,8 +3529,9 @@ def main():
             )
             and not os.environ.get("GEMINI_API_KEY")
         ):
-            if len(api_keys) <= 1 and dpapi_file.exists():
-                dpapi_file.unlink(missing_ok=True)
+            single_key_path = _api_key_path(runtime_dir, api_keys[0][0]) if len(api_keys) == 1 else dpapi_file
+            if len(api_keys) <= 1 and single_key_path.exists():
+                single_key_path.unlink(missing_ok=True)
                 err_msg = "Clave de API no valida. Se ha borrado la clave guardada."
                 err_fix = "Vuelve a ejecutar para introducir una clave valida."
             else:

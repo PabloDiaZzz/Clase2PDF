@@ -1,7 +1,7 @@
 {
-  "version": "1.9.3",
-  "pipeline_sha256": "2fe504b8680d061f4eff6b276516ffec14159cefe9a75dd3a22dd5f434124e32",
-  "bat_sha256": "78e0c991b6b818475707d91ae4bb4ec85ee6a13016631f3a978908f30b2e7223",
+  "version": "1.9.4",
+  "pipeline_sha256": "add5d565b800d8e0548453ab748ecc685fbb41c06a5c29d0d69913bc2eb17c7d",
+  "bat_sha256": "75c8a43caad3b08aa4864b3f415ac10577fa5db1c92e48b0c7c8127e990fd3ed",
   "req_hash": "290b402b91c112a5",
   "requirements": [
     "google-genai",

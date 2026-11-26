@@ -23,7 +23,7 @@ if dpapi_path.exists():
     assert isinstance(existing, str) and len(existing) > 10, "Existing DPAPI decrypt failed"
 
 # 2b. Auto-migration from legacy_pipe_dir & cleanup_intermediate removes empty pipe_dir
-mig_tmp = Path(r"C:\Users\pablo\.gemini\antigravity\brain\cac239b5-6525-4158-9902-758e46192b38\scratch\_mig_test")
+mig_tmp = REPO_ROOT / "tests" / "_mig_v13"
 mig_rt = mig_tmp / "rt"
 mig_leg = mig_tmp / "leg"
 mig_rt.mkdir(parents=True, exist_ok=True)
@@ -398,15 +398,20 @@ finally:
     shutil.rmtree(mig_tmp, ignore_errors=True)
 
 # 3. Real _process_one_audio smoke test with ffmpeg -progress pipe:1
-tmp = Path(r"C:\Users\pablo\.gemini\antigravity\brain\cac239b5-6525-4158-9902-758e46192b38\scratch\_smoke_v13")
+tmp = REPO_ROOT / "tests" / "_smoke_v13"
 (tmp / "clean").mkdir(parents=True, exist_ok=True)
 (tmp / "chunks").mkdir(exist_ok=True)
 try:
+    frag_wav = tmp / "frag1.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=12", "-loglevel", "error", str(frag_wav)],
+        check=True,
+    )
     ui = pipeline.PipelineUI(pipeline.console)
     ui.add_row("audio_1", "frag1.wav")
     chunks, dur = pipeline._process_one_audio(
         1,
-        Path(r"C:\Users\pablo\.gemini\antigravity\brain\cac239b5-6525-4158-9902-758e46192b38\scratch\frag1.wav"),
+        frag_wav,
         tmp / "clean",
         tmp / "chunks",
         ui,

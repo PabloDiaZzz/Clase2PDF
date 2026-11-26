@@ -140,8 +140,13 @@ if not exist "%VENV_PY%" (
 
 set "REQ_PKGS=google-genai rich questionary pypdf fpdf2"
 if exist "%RUNTIME_DIR%\.req_pkgs" set /p REQ_PKGS=<"%RUNTIME_DIR%\.req_pkgs"
-"%VENV_PY%" -c "import google.genai, rich, questionary, pypdf, fpdf" >nul 2>&1
-if errorlevel 1 (
+set "NEED_PIP=0"
+if not "!REQ_DONE!"=="" if not "!REQ_WANT!"=="" if not "!REQ_DONE!"=="!REQ_WANT!" set "NEED_PIP=1"
+if "!NEED_PIP!"=="0" (
+    "%VENV_PY%" -c "import google.genai, rich, questionary, pypdf, fpdf" >nul 2>&1
+    if errorlevel 1 set "NEED_PIP=1"
+)
+if "!NEED_PIP!"=="1" (
     echo Preparando dependencias...
     "%VENV_PY%" -m pip install -q --upgrade pip !REQ_PKGS!
     if errorlevel 1 (
