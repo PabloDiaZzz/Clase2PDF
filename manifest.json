@@ -1,0 +1,12 @@
+{
+  "version": "1.9.0",
+  "pipeline_sha256": "8e03e3cbbee442c21f23a5e157b3eb190d429658443500fd0de3a2ce4bc0d787",
+  "bat_sha256": "eccd1b76b6a2cd2b58cc80e757e73163162ec91bff9f3e33c18a34d8d982f02f",
+  "req_hash": "7a4d457a1d19e19a",
+  "requirements": [
+    "google-genai",
+    "rich",
+    "questionary",
+    "pypdf"
+  ]
+}
