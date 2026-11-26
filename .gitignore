@@ -1,23 +1,48 @@
+# Python & runtime
 __pycache__/
 *.py[cod]
 *$py.class
 .clase_pipeline/
 venv/
-*.dpapi
-*.log
-*.tmp.*
 .env_ready*
 .pipe_hash
 .req_*
+*.tmp.*
+*.log
+
+# Secrets & keys
+*.dpapi
+.env
+.env.*
+*.key
+*.pem
+
+# Documents & generated notes (keep README.md contracts)
+*.pdf
+*.docx
+*.doc
+*.md
+!README.md
+
+# Audio / video / archives
 *.mp3
 *.m4a
 *.mp4
+*.mka
 *.wav
 *.aac
 *.ogg
 *.opus
 *.flac
 *.webm
-APUNTES_*.pdf
-TRANSCRIPCION_*.pdf
-COMO_ANADIR_API.pdf
+*.mkv
+*.mov
+*.avi
+*.zip
+*.7z
+*.rar
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
