@@ -95,7 +95,7 @@ Detalle de cada fase:
    - Sube cada bloque limpio a Gemini, lo transcribe apoyándose en el vocabulario técnico y elimina el archivo remoto al terminar.
    - Si tienes 2 o más APIs de proyectos distintos, procesa bloques en paralelo (hasta 3 a la vez) asignando cada bloque a una API diferente.
    - Antes de reutilizar caché previa, inspecciona los `.txt` antiguos: si detecta alucinaciones, bucles de repetición (incluidos caracteres sin espacios) o archivos vacíos, los **borra automáticamente** y los re-transcribe de cero.
-   - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena (`gemini-3.1-flash-lite` y `gemma-4` como respaldo extra).
+   - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena (`gemma-4` solo como respaldo en tareas auxiliares de texto).
 6. **Filtrado y división de documentos o clases largas (Triage):**
    - Si hay varios documentos o algún PDF supera las 25 páginas, recorta literalmente solo las páginas relevantes con `pypdf` sin resumir.
    - Si hay un único PDF grande (`> 25 páginas`) como base (o como guía en modo `apuntes`), planifica y divide el trabajo por temas para generar varios PDFs temáticos en lugar de un único PDF gigante.

@@ -84,9 +84,9 @@ FFMPEG_FILTER = (
 )
 
 RETRY_DELAYS = (5, 10, 15, 20)
-MODELS_CHAIN = ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it")
-VOCAB_MODELS_CHAIN = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it")
-TRIAGE_MODELS_CHAIN = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.8-flash")
+MODELS_CHAIN = ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+VOCAB_MODELS_CHAIN = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it")
+TRIAGE_MODELS_CHAIN = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.8-flash")
 LARGE_PDF_PAGES = 25
 PDF_CHUNK_PAGES = 25
 MAX_CHUNK_WORDS_SANE = 18000
