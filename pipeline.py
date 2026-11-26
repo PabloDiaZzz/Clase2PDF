@@ -50,7 +50,7 @@ THEME = Theme(
 )
 console = Console(theme=THEME)
 
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.9.3"
 
 
 def _load_genai():
@@ -84,9 +84,9 @@ FFMPEG_FILTER = (
 )
 
 RETRY_DELAYS = (5, 10, 15, 20)
-MODELS_CHAIN = ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
-VOCAB_MODELS_CHAIN = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
-TRIAGE_MODELS_CHAIN = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash")
+MODELS_CHAIN = ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it")
+VOCAB_MODELS_CHAIN = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it")
+TRIAGE_MODELS_CHAIN = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.8-flash")
 LARGE_PDF_PAGES = 25
 PDF_CHUNK_PAGES = 25
 MAX_CHUNK_WORDS_SANE = 18000
@@ -94,6 +94,9 @@ LOOP_RETRY_DROPPED_WORDS = 3000
 LARGE_TRANSCRIPT_WORDS = 18000
 MAX_TOPIC_WORDS = 22000
 TRANSCRIBE_MAX_OUTPUT_TOKENS = 20000
+MAX_CHUNK_CHARS_SANE = 120000
+LOOP_RETRY_DROPPED_CHARS = 15000
+MAX_CONCURRENT_API_WORKERS = 3
 
 
 def natural_key(path: Path):
@@ -602,6 +605,7 @@ class ClientPool:
         self._keys = list(keys)
         self._factory = client_factory
         self._clients: dict[int, object] = {}
+        self._lock = threading.Lock()
         self.current_idx = 0
         self.exhausted_pairs: set[tuple[int, str]] = set()
         self.invalid_keys: set[int] = set()
@@ -611,38 +615,45 @@ class ClientPool:
         return len(self._keys)
 
     def current_slot(self) -> int:
-        return self._keys[self.current_idx][0]
+        with self._lock:
+            return self._keys[self.current_idx][0]
 
     def get_client(self, idx: int | None = None):
-        i = self.current_idx if idx is None else idx
-        if i not in self._clients:
-            _, key = self._keys[i]
-            if self._factory is not None:
-                self._clients[i] = self._factory(key)
-            else:
-                genai, types = _load_genai()
-                self._clients[i] = genai.Client(
-                    api_key=key,
-                    http_options=types.HttpOptions(api_version="v1beta"),
-                )
-        return self._clients[i]
+        with self._lock:
+            i = self.current_idx if idx is None else idx
+            if i not in self._clients:
+                _, key = self._keys[i]
+                if self._factory is not None:
+                    self._clients[i] = self._factory(key)
+                else:
+                    genai, types = _load_genai()
+                    self._clients[i] = genai.Client(
+                        api_key=key,
+                        http_options=types.HttpOptions(api_version="v1beta"),
+                    )
+            return self._clients[i]
 
-    def candidate_indices(self, model: str) -> list[int]:
-        n = len(self._keys)
-        order = [(self.current_idx + off) % n for off in range(n)]
-        return [
-            i for i in order
-            if i not in self.invalid_keys and (i, model) not in self.exhausted_pairs
-        ]
+    def candidate_indices(self, model: str, preferred_idx: int | None = None) -> list[int]:
+        with self._lock:
+            n = len(self._keys)
+            start = (preferred_idx % n) if preferred_idx is not None else self.current_idx
+            order = [(start + off) % n for off in range(n)]
+            return [
+                i for i in order
+                if i not in self.invalid_keys and (i, model) not in self.exhausted_pairs
+            ]
 
     def mark_exhausted(self, idx: int, model: str):
-        self.exhausted_pairs.add((idx, model))
+        with self._lock:
+            self.exhausted_pairs.add((idx, model))
 
     def mark_invalid(self, idx: int):
-        self.invalid_keys.add(idx)
+        with self._lock:
+            self.invalid_keys.add(idx)
 
     def select(self, idx: int):
-        self.current_idx = idx
+        with self._lock:
+            self.current_idx = idx
 
 
 def _upload_local_file(client, path: Path, on_status=None):
@@ -811,12 +822,15 @@ def generate_with_fallback(
     file_paths: list[Path] | None = None,
     preuploaded: tuple[int, list] | None = None,
     models_chain: tuple[str, ...] = MODELS_CHAIN,
+    preferred_key_idx: int | None = None,
 ):
     """Prioriza mantener el mismo modelo rotando entre APIs; solo baja de modelo si todas agotan cuota."""
     last_exc = None
     for m_idx, model in enumerate(models_chain):
+        if model.startswith("gemma-") and (file_paths or preuploaded):
+            continue
         cfg = _config_for_model(config, model)
-        candidates = pool.candidate_indices(model)
+        candidates = pool.candidate_indices(model, preferred_idx=preferred_key_idx)
         for c_pos, key_idx in enumerate(candidates):
             client = pool.get_client(key_idx)
             uploaded_here: list = []
@@ -844,7 +858,8 @@ def generate_with_fallback(
                     on_status=on_status,
                     retry_rate_limit=(c_pos + 1 >= len(candidates)),
                 )
-                pool.select(key_idx)
+                if preferred_key_idx is None:
+                    pool.select(key_idx)
                 return resp, model
             except Exception as exc:
                 last_exc = exc
@@ -858,7 +873,8 @@ def generate_with_fallback(
                 elif kind == "quota_daily":
                     pool.mark_exhausted(key_idx, model)
                 if c_pos + 1 < len(candidates):
-                    pool.select(candidates[c_pos + 1])
+                    if preferred_key_idx is None:
+                        pool.select(candidates[c_pos + 1])
                     msg = "[warn]Cambiando de clave...[/]"
                     if on_status:
                         on_status(msg)
@@ -2047,12 +2063,15 @@ def clean_and_split_audios(
 
 
 def _clean_repetition_loops(text: str) -> tuple[str, int]:
-    """Elimina bucles de repeticion de palabras, frases o lineas generados ante silencios."""
+    """Elimina bucles de repeticion de caracteres, palabras, frases o lineas generados ante silencios."""
     orig_words = len(text.split())
     if not text.strip():
         return text, 0
 
-    lines = text.splitlines()
+    text_work = re.sub(r"([^\s\-|=*_])\1{11,}", r"\1\1\1", text)
+    text_work = re.sub(r"((?:[^\s\-|=*_][^\n]{1,24}?))\1{7,}", r"\1", text_work)
+
+    lines = text_work.splitlines()
     norm_lines = [re.sub(r"\s+", " ", ln.strip().lower()) for ln in lines]
     is_divider = [bool(re.match(r"^[\|\s:\-]+$", ln.strip())) for ln in lines]
 
@@ -2139,6 +2158,16 @@ def _is_suspicious_loop(orig_words: int, dropped_words: int) -> bool:
     return dropped_words >= LOOP_RETRY_DROPPED_WORDS or orig_words > MAX_CHUNK_WORDS_SANE
 
 
+def _is_suspicious_transcript(raw_text: str, clean_text: str, dropped_words: int) -> bool:
+    return (
+        not clean_text.strip()
+        or dropped_words >= LOOP_RETRY_DROPPED_WORDS
+        or len(raw_text.split()) > MAX_CHUNK_WORDS_SANE
+        or len(raw_text) > MAX_CHUNK_CHARS_SANE
+        or (len(raw_text) - len(clean_text)) >= LOOP_RETRY_DROPPED_CHARS
+    )
+
+
 def transcribe_chunks(
     pool: ClientPool,
     chunks: list[Path],
@@ -2150,7 +2179,6 @@ def transcribe_chunks(
     _, types = _load_genai()
     tx_dir = pipe_dir / "transcripts"
     tx_dir.mkdir(exist_ok=True)
-    transcripts: list[str] = []
     used_models: list[str] = []
     vocab_note = f" Vocabulario tecnico de referencia: {', '.join(vocab[:100])}." if vocab else ""
 
@@ -2159,8 +2187,8 @@ def transcribe_chunks(
         ui.add_row(f"tx_{i}", lbl)
     ui.set_progress(description=f"{step_label} · Transcribiendo...", total=len(chunks), completed=0)
 
-    def _upload_and_wait(path: Path, on_status=None):
-        up_idx = pool.current_idx
+    def _upload_and_wait(path: Path, on_status=None, key_idx: int | None = None):
+        up_idx = (key_idx % pool.size) if key_idx is not None else pool.current_idx
         c = pool.get_client(up_idx)
         f = _upload_local_file(c, path, on_status=on_status)
         return up_idx, wait_file_active(c, f, on_status=on_status)
@@ -2173,7 +2201,14 @@ def transcribe_chunks(
             except Exception:
                 pass
 
-    def _transcribe_once(chunk_path: Path, up_item, row_key: str, idx: int, retry_anti_loop: bool = False):
+    def _transcribe_once(
+        chunk_path: Path,
+        up_item,
+        row_key: str,
+        idx: int,
+        retry_anti_loop: bool = False,
+        preferred_key_idx: int | None = None,
+    ):
         up_idx, uploaded = up_item
         prompt_txt = (
             "Transcribe integramente y de forma literal este audio de clase en espanol, "
@@ -2199,14 +2234,14 @@ def transcribe_chunks(
             on_status=lambda msg, rk=row_key: ui.update_row(rk, msg),
             file_paths=[chunk_path],
             preuploaded=(up_idx, [uploaded]),
+            preferred_key_idx=preferred_key_idx,
         )
         return (resp.text or "").strip(), m_used
 
-    def _pick_better_text(clean_a: str, orig_a_w: int, drop_a: int, raw_b: str) -> str:
+    def _pick_better_text(clean_a: str, drop_a: int, raw_b: str) -> str:
         clean_b, drop_b = _clean_repetition_loops(raw_b)
-        orig_b_w = len(raw_b.split())
         if clean_b and (
-            not _is_suspicious_loop(orig_b_w, drop_b)
+            not _is_suspicious_transcript(raw_b, clean_b, drop_b)
             or drop_b < drop_a
             or len(clean_b.split()) > len(clean_a.split())
         ):
@@ -2218,93 +2253,131 @@ def transcribe_chunks(
         tx_tmp.write_text(content, encoding="utf-8")
         os.replace(tx_tmp, tx_file)
 
-    prefetch_fut = None
-    with ThreadPoolExecutor(max_workers=1) as up_pool:
-        try:
-            for i, chunk in enumerate(chunks, 1):
-                row_key = f"tx_{i}"
-                tx_file = tx_dir / f"{chunk.stem}.txt"
-                if tx_file.exists():
-                    raw_cached = tx_file.read_text(encoding="utf-8")
-                    orig_w = len(raw_cached.split())
-                    clean_cached, dropped = _clean_repetition_loops(raw_cached)
-                    if _is_suspicious_loop(orig_w, dropped):
-                        ui.update_row(row_key, "[warn]Bucle en cache, reintentando...[/]", "")
-                        retry_item = _upload_and_wait(chunk, on_status=lambda msg, rk=row_key: ui.update_row(rk, msg))
-                        try:
-                            retry_raw, retry_model = _transcribe_once(chunk, retry_item, row_key, i, retry_anti_loop=True)
-                            text = _pick_better_text(clean_cached, orig_w, dropped, retry_raw)
-                            used_models.append(retry_model)
-                        finally:
-                            _delete_remote(retry_item)
-                        _save_tx(tx_file, text)
-                    else:
-                        text = clean_cached
-                        if dropped > 0:
-                            _save_tx(tx_file, text)
+    results: list[str | None] = [None] * len(chunks)
+    pending: list[tuple[int, Path, bool]] = []
 
-                    words = len(text.split())
-                    ui.update_row(row_key, "[ok]✓ Listo[/]", f"{words:,} palabras")
-                    transcripts.append(text)
-                    ui.set_progress(advance=1)
+    # Barrido previo: purgar fisicamente caches corruptas/vacias antes de transcribir
+    for i, chunk in enumerate(chunks, 1):
+        row_key = f"tx_{i}"
+        tx_file = tx_dir / f"{chunk.stem}.txt"
+        if tx_file.exists():
+            try:
+                raw_cached = tx_file.read_text(encoding="utf-8")
+            except OSError:
+                raw_cached = ""
+            clean_cached, dropped_w = _clean_repetition_loops(raw_cached)
+            if _is_suspicious_transcript(raw_cached, clean_cached, dropped_w):
+                tx_file.unlink(missing_ok=True)
+                ui.update_row(row_key, "[warn]Cache corrupta borrada[/]", "")
+                pending.append((i, chunk, True))
+            else:
+                if clean_cached != raw_cached:
+                    _save_tx(tx_file, clean_cached)
+                results[i - 1] = clean_cached
+                ui.update_row(row_key, "[ok]✓ Listo[/]", f"{len(clean_cached.split()):,} palabras")
+                ui.set_progress(advance=1)
+        else:
+            pending.append((i, chunk, False))
+
+    def _run_pending_chunk(
+        i: int,
+        chunk: Path,
+        force_anti_loop: bool,
+        pref_idx: int | None,
+        pre_up=None,
+    ) -> tuple[str, str]:
+        row_key = f"tx_{i}"
+        tx_file = tx_dir / f"{chunk.stem}.txt"
+        ui.update_row(row_key, "[accent]Transcribiendo...[/]", "")
+        up_item = pre_up
+        if up_item is None:
+            up_item = _upload_and_wait(
+                chunk,
+                on_status=lambda msg, rk=row_key: ui.update_row(rk, msg),
+                key_idx=pref_idx,
+            )
+        try:
+            raw_text, model_used = _transcribe_once(
+                chunk,
+                up_item,
+                row_key,
+                i,
+                retry_anti_loop=force_anti_loop,
+                preferred_key_idx=pref_idx,
+            )
+            clean_text, dropped_w = _clean_repetition_loops(raw_text)
+            if not force_anti_loop and _is_suspicious_transcript(raw_text, clean_text, dropped_w):
+                ui.update_row(row_key, "[warn]Bucle detectado, reintentando...[/]", "")
+                retry_raw, retry_model = _transcribe_once(
+                    chunk,
+                    up_item,
+                    row_key,
+                    i,
+                    retry_anti_loop=True,
+                    preferred_key_idx=pref_idx,
+                )
+                text = _pick_better_text(clean_text, dropped_w, retry_raw)
+                model_used = retry_model
+            else:
+                text = clean_text
+            if not text.strip():
+                raise RuntimeError(f"Transcripcion vacia en bloque {i}/{len(chunks)}.")
+            _save_tx(tx_file, text)
+            ui.update_row(row_key, "[ok]✓ Listo[/]", f"{len(text.split()):,} palabras")
+            ui.set_progress(advance=1)
+            return text, model_used
+        finally:
+            _delete_remote(up_item)
+
+    if len(pending) > 1 and pool.size > 1:
+        n_workers = min(pool.size, len(pending), MAX_CONCURRENT_API_WORKERS)
+        with ThreadPoolExecutor(max_workers=n_workers) as tx_pool:
+            futs = {
+                tx_pool.submit(_run_pending_chunk, i, chunk, force_anti_loop, seq % pool.size): i
+                for seq, (i, chunk, force_anti_loop) in enumerate(pending)
+            }
+            for fut, idx_chunk in futs.items():
+                text_out, model_out = fut.result()
+                results[idx_chunk - 1] = text_out
+                if model_out not in used_models:
+                    used_models.append(model_out)
+    elif pending:
+        prefetch_fut = None
+        with ThreadPoolExecutor(max_workers=1) as up_pool:
+            try:
+                for pos, (i, chunk, force_anti_loop) in enumerate(pending):
+                    pre_item = None
                     if prefetch_fut is not None:
                         try:
-                            _delete_remote(prefetch_fut.result())
+                            cand = prefetch_fut.result()
+                            if cand[0] == pool.current_idx:
+                                pre_item = cand
+                            else:
+                                _delete_remote(cand)
                         except Exception:
                             pass
                         prefetch_fut = None
-                    continue
-
-                ui.update_row(row_key, "[accent]Transcribiendo...[/]", "")
-                up_item = None
-                if prefetch_fut is not None:
-                    try:
-                        cand = prefetch_fut.result()
-                        if cand[0] == pool.current_idx:
-                            up_item = cand
-                        else:
-                            _delete_remote(cand)
-                    except Exception:
-                        pass
-                    prefetch_fut = None
-                if up_item is None:
-                    up_item = _upload_and_wait(chunk, on_status=lambda msg, rk=row_key: ui.update_row(rk, msg))
-
-                if i < len(chunks):
-                    next_chunk = chunks[i]
-                    next_tx = tx_dir / f"{next_chunk.stem}.txt"
-                    if not next_tx.exists():
+                    if pre_item is None:
+                        pre_item = _upload_and_wait(
+                            chunk,
+                            on_status=lambda msg, rk=f"tx_{i}": ui.update_row(rk, msg),
+                        )
+                    if pos + 1 < len(pending):
+                        next_chunk = pending[pos + 1][1]
                         prefetch_fut = up_pool.submit(_upload_and_wait, next_chunk)
 
-                try:
-                    raw_text, model_used = _transcribe_once(chunk, up_item, row_key, i, retry_anti_loop=False)
-                    orig_w = len(raw_text.split())
-                    clean_text, dropped = _clean_repetition_loops(raw_text)
-                    if _is_suspicious_loop(orig_w, dropped):
-                        ui.update_row(row_key, "[warn]Bucle detectado, reintentando...[/]", "")
-                        retry_raw, retry_model = _transcribe_once(chunk, up_item, row_key, i, retry_anti_loop=True)
-                        text = _pick_better_text(clean_text, orig_w, dropped, retry_raw)
-                        model_used = retry_model
-                    else:
-                        text = clean_text
-                    _save_tx(tx_file, text)
-                    if not text.strip():
-                        raise RuntimeError(f"Transcripcion vacia en bloque {i}/{len(chunks)}.")
-                    transcripts.append(text)
-                    used_models.append(model_used)
-                    words = len(text.split())
-                    ui.update_row(row_key, "[ok]✓ Listo[/]", f"{words:,} palabras")
-                finally:
-                    _delete_remote(up_item)
-                ui.set_progress(advance=1)
-        finally:
-            if prefetch_fut is not None:
-                try:
-                    _delete_remote(prefetch_fut.result(timeout=2))
-                except Exception:
-                    pass
+                    text_out, model_out = _run_pending_chunk(i, chunk, force_anti_loop, None, pre_up=pre_item)
+                    results[i - 1] = text_out
+                    if model_out not in used_models:
+                        used_models.append(model_out)
+            finally:
+                if prefetch_fut is not None:
+                    try:
+                        _delete_remote(prefetch_fut.result(timeout=2))
+                    except Exception:
+                        pass
 
-    return transcripts, used_models
+    return [r or "" for r in results], used_models
 
 
 def strip_markdown_fences(md_text: str) -> str:
@@ -2330,8 +2403,11 @@ def synthesize_notes(
     guide_docs: list[Path] | None = None,
     style_only: bool = False,
     topic_focus: str | None = None,
+    preferred_key_idx: int | None = None,
+    on_status=None,
 ) -> tuple[str, str]:
-    ui.update_row("review", "[accent]Revisando...[/]", "")
+    if on_status is None:
+        ui.update_row("review", "[accent]Revisando...[/]", "")
     joined = "\n\n".join(
         f"=== BLOQUE {i} ===\n{t}" for i, t in enumerate(transcripts, 1)
     )
@@ -2445,6 +2521,7 @@ NUEVA TRANSCRIPCION:
 """
     _, types = _load_genai()
     call_contents = [*docx_texts, prompt] if docx_texts else prompt
+    status_cb = on_status or (lambda msg: ui.update_row("review", msg))
     resp, used_model = generate_with_fallback(
         pool,
         call_contents,
@@ -2452,13 +2529,15 @@ NUEVA TRANSCRIPCION:
             thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
         ),
         "Revision",
-        on_status=lambda msg: ui.update_row("review", msg),
+        on_status=status_cb,
         file_paths=upload_paths or None,
+        preferred_key_idx=preferred_key_idx,
     )
     md_text = strip_markdown_fences(resp.text or "")
     if not md_text.strip():
         raise RuntimeError("Respuesta vacia del modelo al generar el documento.")
-    ui.update_row("review", "[ok]✓ Listo[/]", "")
+    if on_status is None:
+        ui.update_row("review", "[ok]✓ Listo[/]", "")
     return md_text, used_model
 
 
@@ -3209,11 +3288,10 @@ def main():
             out_prefix = TRANSCRIPT_PREFIX if output_mode == "transcripcion" else OUTPUT_PREFIX
             topics_cache_dir = pipe_dir / "topics"
             topics_cache_dir.mkdir(exist_ok=True)
-            synthesized: list[tuple[dict, str]] = []
+            synthesized_slots: list[tuple[dict, str] | None] = [None] * len(topic_jobs)
+            pending_topics: list[tuple[int, dict, list[str], Path]] = []
 
             for j_idx, job in enumerate(topic_jobs, 1):
-                if len(topic_jobs) > 1:
-                    ui.update_row("review", f"[accent]Tema {j_idx}/{len(topic_jobs)}...[/]", "")
                 job_txs = job.get("transcripts") or transcripts
                 sig_payload = json.dumps(
                     {
@@ -3235,8 +3313,63 @@ def main():
                     except OSError:
                         cached_md = ""
                 if cached_md.strip():
-                    md_text = cached_md
+                    synthesized_slots[j_idx - 1] = (job, cached_md)
                 else:
+                    pending_topics.append((j_idx, job, job_txs, topic_cache))
+
+            if len(pending_topics) > 1 and pool.size > 1:
+                n_rev_workers = min(pool.size, len(pending_topics), MAX_CONCURRENT_API_WORKERS)
+                done_topics = len(topic_jobs) - len(pending_topics)
+                rev_lock = threading.Lock()
+                ui.update_row(
+                    "review",
+                    f"[accent]Revisando ({done_topics}/{len(topic_jobs)})...[/]",
+                    f"{n_rev_workers} APIs en paralelo",
+                )
+
+                def _run_topic(j_idx: int, job: dict, job_txs: list[str], topic_cache: Path, pref_idx: int):
+                    nonlocal done_topics
+                    md_out, rev_m = synthesize_notes(
+                        pool,
+                        job_txs,
+                        vocab,
+                        job["title"] or fallback_name,
+                        ui,
+                        base_notes=job["base"],
+                        mode=output_mode,
+                        guide_docs=job["guides"],
+                        style_only=job["style_only"],
+                        topic_focus=job["title"],
+                        preferred_key_idx=pref_idx,
+                        on_status=lambda _msg: None,
+                    )
+                    t_tmp = topic_cache.with_suffix(".tmp.md")
+                    t_tmp.write_text(md_out, encoding="utf-8")
+                    os.replace(t_tmp, topic_cache)
+                    with rev_lock:
+                        done_topics += 1
+                        if rev_m not in models_used:
+                            models_used.append(rev_m)
+                        ui.update_row(
+                            "review",
+                            f"[accent]Revisando ({done_topics}/{len(topic_jobs)})...[/]",
+                            f"{n_rev_workers} APIs en paralelo",
+                        )
+                    return j_idx, job, md_out
+
+                with ThreadPoolExecutor(max_workers=n_rev_workers) as rev_pool:
+                    futs = [
+                        rev_pool.submit(_run_topic, j_idx, job, job_txs, topic_cache, seq % pool.size)
+                        for seq, (j_idx, job, job_txs, topic_cache) in enumerate(pending_topics)
+                    ]
+                    for fut in futs:
+                        r_idx, r_job, r_md = fut.result()
+                        synthesized_slots[r_idx - 1] = (r_job, r_md)
+                ui.update_row("review", "[ok]✓ Listo[/]", f"{len(topic_jobs)} temas")
+            else:
+                for j_idx, job, job_txs, topic_cache in pending_topics:
+                    if len(topic_jobs) > 1:
+                        ui.update_row("review", f"[accent]Tema {j_idx}/{len(topic_jobs)}...[/]", "")
                     md_text, rev_model = synthesize_notes(
                         pool,
                         job_txs,
@@ -3254,7 +3387,11 @@ def main():
                     t_tmp = topic_cache.with_suffix(".tmp.md")
                     t_tmp.write_text(md_text, encoding="utf-8")
                     os.replace(t_tmp, topic_cache)
-                synthesized.append((job, md_text))
+                    synthesized_slots[j_idx - 1] = (job, md_text)
+                if not pending_topics:
+                    ui.update_row("review", "[ok]✓ Listo[/]", "cache")
+
+            synthesized = [item for item in synthesized_slots if item is not None]
 
             ui.set_progress(description=f"Paso {3 + step_off}/{total_steps} · Creando PDF...", advance=1)
             generated_pdfs: list[Path] = []

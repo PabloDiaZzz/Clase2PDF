@@ -91,10 +91,11 @@ Detalle de cada fase:
 4. **Limpieza y división de audio (`ffmpeg`):**
    - Aplica filtros de limpieza de ruido de aula, ecualización de voz y normalización de volumen.
    - Si un audio es largo, lo divide en bloques de 45 minutos (con 15 segundos de solapamiento) dentro de `.clase_pipeline/`. Guarda huella de cada audio para no repetir la limpieza si reintentas tras un fallo.
-5. **Transcripción por bloques:**
+5. **Transcripción por bloques (concurrente con varias APIs):**
    - Sube cada bloque limpio a Gemini, lo transcribe apoyándose en el vocabulario técnico y elimina el archivo remoto al terminar.
-   - Si Gemini entra en bucle repitiendo palabras o frases ante silencios, el script lo detecta, limpia y reintenta automáticamente con temperatura baja.
-   - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena.
+   - Si tienes 2 o más APIs de proyectos distintos, procesa bloques en paralelo (hasta 3 a la vez) asignando cada bloque a una API diferente.
+   - Antes de reutilizar caché previa, inspecciona los `.txt` antiguos: si detecta alucinaciones, bucles de repetición (incluidos caracteres sin espacios) o archivos vacíos, los **borra automáticamente** y los re-transcribe de cero.
+   - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena (`gemini-3.1-flash-lite` y `gemma-4` como respaldo extra).
 6. **Filtrado y división de documentos o clases largas (Triage):**
    - Si hay varios documentos o algún PDF supera las 25 páginas, recorta literalmente solo las páginas relevantes con `pypdf` sin resumir.
    - Si hay un único PDF grande (`> 25 páginas`) como base (o como guía en modo `apuntes`), planifica y divide el trabajo por temas para generar varios PDFs temáticos en lugar de un único PDF gigante.
@@ -176,6 +177,7 @@ Si sueles procesar clases largas o varias seguidas, conviene añadir 2 o más AP
 ```
 
 - **Gestión individual:** desde `--apis` puedes añadir, probar, eliminar una clave concreta o borrar todas las guardadas.
+- **Ejecución en paralelo:** si añades 2 o más API Keys de **proyectos distintos**, `Clase2PDF` transcribe bloques y sintetiza temas en paralelo (hasta 3 a la vez), reduciendo el tiempo total.
 - **Rotación automática (`429`):** si una clave agota su cuota, `Clase2PDF` pasa inmediatamente a la siguiente clave manteniendo el mejor modelo.
 - **Fallback de modelo (`503`):** si los servidores de un modelo están saturados, baja al siguiente modelo disponible al instante.
 - **Seguridad:** las claves se cifran localmente con Windows DPAPI (`api_key.dpapi`, `api_key_2.dpapi`, etc.) y **nunca** se muestran completas ni se suben a ninguna carpeta de clase.

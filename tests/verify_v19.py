@@ -157,7 +157,7 @@ try:
     try:
         r_up = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
         assert r_up.returncode == 0, f"Auto-update failed: {r_up.returncode} {r_up.stdout} {r_up.stderr}"
-        assert "Clase2PDF 1.9.2" in r_up.stdout
+        assert "Clase2PDF 1.9.3" in r_up.stdout
         assert (rt_dir / "pipeline.py").exists() and (rt_dir / ".pipe_hash").exists()
         assert (tmp_root / "INSTRUCCIONES.md").exists() and not (rt_dir / "INSTRUCCIONES.md").exists()
     finally:
@@ -166,7 +166,7 @@ try:
 
     # Offline fallback after server stopped (pipeline.py already cached)
     r_off = subprocess.run(["cmd", "/c", str(bat_copy), "--version"], capture_output=True, text=True, encoding="utf-8", env=test_env)
-    assert r_off.returncode == 0 and "Clase2PDF 1.9.2" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
+    assert r_off.returncode == 0 and "Clase2PDF 1.9.3" in r_off.stdout, f"Offline fallback failed: {r_off.returncode} {r_off.stderr}"
 
     # 6. v1.9.1: repetition-loop cleaner
     w_loop = "Inicio de clase. " + ("silencio " * 12) + "Fin."
@@ -283,6 +283,78 @@ try:
     finally:
         pipeline.subprocess.run = orig_run
         pipeline.find_browser = orig_fb2
+
+    # 15. v1.9.3: character-level loop without spaces detected and cleaned
+    char_loop = "Inicio. " + ("ja," * 6000) + " Fin."
+    cc_clean, cc_drop = pipeline._clean_repetition_loops(char_loop)
+    assert len(cc_clean) < 100 and pipeline._is_suspicious_transcript(char_loop, cc_clean, cc_drop)
+
+    # 16. v1.9.3: corrupt cached .txt is physically deleted before rewrite
+    purge_dir = tmp_root / "purge_test"
+    (purge_dir / "transcripts").mkdir(parents=True, exist_ok=True)
+    purge_chunk = purge_dir / "c1.mp3"
+    purge_chunk.write_bytes(b"fake")
+    purge_txt = purge_dir / "transcripts" / "c1.txt"
+    purge_txt.write_text("ja," * 6000, encoding="utf-8")
+    existed_during_retry = []
+    orig_up3, orig_w3, orig_gwf4 = pipeline._upload_local_file, pipeline.wait_file_active, pipeline.generate_with_fallback
+    try:
+        pipeline._upload_local_file = lambda c, p, on_status=None: type("F", (), {"name": "files/f1"})()
+        pipeline.wait_file_active = lambda c, f, on_status=None: f
+        def _fake_gwf_purge(*a, **kw):
+            existed_during_retry.append(purge_txt.exists())
+            return type("R", (), {"text": "Texto limpio reescrito."})(), "gemini-4-hydrogen"
+        pipeline.generate_with_fallback = _fake_gwf_purge
+        out_p, _ = pipeline.transcribe_chunks(pool_429, [purge_chunk], [], purge_dir, ui)
+        assert existed_during_retry == [False], existed_during_retry
+        assert out_p == ["Texto limpio reescrito."]
+        assert purge_txt.read_text(encoding="utf-8") == "Texto limpio reescrito."
+    finally:
+        pipeline._upload_local_file, pipeline.wait_file_active, pipeline.generate_with_fallback = orig_up3, orig_w3, orig_gwf4
+
+    # 17. v1.9.3: concurrent transcribe_chunks assigns distinct keys across 2-key pool
+    conc_dir = tmp_root / "conc_test"
+    (conc_dir / "transcripts").mkdir(parents=True, exist_ok=True)
+    c_a = conc_dir / "a.mp3"
+    c_b = conc_dir / "b.mp3"
+    c_a.write_bytes(b"a")
+    c_b.write_bytes(b"b")
+    seen_owners = []
+    class _ConcModels:
+        def __init__(self, owner):
+            self.owner = owner
+        def generate_content(self, model, contents, config=None):
+            seen_owners.append(self.owner)
+            return type("Resp", (), {"text": f"ok_{self.owner}"})()
+    class _ConcFiles:
+        def upload(self, **kw):
+            return type("F", (), {"name": "files/x", "state": type("S", (), {"name": "ACTIVE"})()})()
+        def delete(self, **kw):
+            pass
+    pool_conc = pipeline.ClientPool(
+        [(1, "AIzaSyKeyOne000000001"), (2, "AIzaSyKeyTwo000000002")],
+        client_factory=lambda k: type("C", (), {"models": _ConcModels("API1" if "One" in k else "API2"), "files": _ConcFiles()})(),
+    )
+    out_c, _ = pipeline.transcribe_chunks(pool_conc, [c_a, c_b], [], conc_dir, ui)
+    assert len(out_c) == 2 and set(seen_owners) == {"API1", "API2"}, (out_c, seen_owners)
+
+    # 18. v1.9.3: generate_with_fallback skips gemma-4-* when file_paths is passed, allows on text-only
+    gemma_calls = []
+    class _GemmaModels:
+        def generate_content(self, model, contents, config=None):
+            gemma_calls.append(model)
+            return type("Resp", (), {"text": "ok_gemma"})()
+    pool_gemma = pipeline.ClientPool(
+        [(1, "AIzaSyKeyOne000000001")],
+        client_factory=lambda k: type("C", (), {"models": _GemmaModels(), "files": _ConcFiles()})(),
+    )
+    _, gm_txt = pipeline.generate_with_fallback(pool_gemma, "hola", None, "GemmaTxt", models_chain=("gemma-4-31b-it",))
+    assert gm_txt == "gemma-4-31b-it" and gemma_calls == ["gemma-4-31b-it"]
+    gemma_calls.clear()
+    _, gm_file = pipeline.generate_with_fallback(
+        pool_gemma, "hola", None, "GemmaFile", file_paths=[c_a], models_chain=("gemma-4-31b-it", "gemini-3.8-flash")
+    )
+    assert gm_file == "gemini-3.8-flash" and gemma_calls == ["gemini-3.8-flash"], gemma_calls
 
     # Remove junction safely before rmtree
     subprocess.run(["cmd", "/c", "rmdir", str(rt_dir / "venv")], check=True, capture_output=True)
