@@ -11,12 +11,13 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 
 1. [Requisitos y primera ejecución](#requisitos-y-primera-ejecución)
 2. [Cómo usarlo (paso a paso)](#cómo-usarlo-paso-a-paso)
-3. [Modos de uso y comandos (CLI)](#modos-de-uso-y-comandos-cli)
-4. [Qué archivos lee, ignora y genera](#qué-archivos-lee-ignora-y-genera)
-5. [Gestión de varias API Keys](#gestión-de-varias-api-keys)
-6. [Auto-actualización y modo offline](#auto-actualización-y-modo-offline)
-7. [Errores frecuentes y cómo solucionarlos](#errores-frecuentes-y-cómo-solucionarlos)
-8. [Códigos de salida](#códigos-de-salida)
+3. [Flujo completo del programa](#flujo-completo-del-programa)
+4. [Modos de uso y comandos (CLI)](#modos-de-uso-y-comandos-cli)
+5. [Qué archivos lee, ignora y genera](#qué-archivos-lee-ignora-y-genera)
+6. [Gestión de varias API Keys](#gestión-de-varias-api-keys)
+7. [Auto-actualización y modo offline](#auto-actualización-y-modo-offline)
+8. [Errores frecuentes y cómo solucionarlos](#errores-frecuentes-y-cómo-solucionarlos)
+9. [Códigos de salida](#códigos-de-salida)
 
 ---
 
@@ -56,6 +57,50 @@ Convierte grabaciones de clase (audio o vídeo) y documentos de apoyo en **apunt
 # Generar transcripción y conservar también el archivo Markdown (.md)
 .\procesar_clase.bat --mode transcripcion --keep-md
 ```
+
+---
+
+## Flujo completo del programa
+
+```text
+procesar_clase.bat
+  ├── [0] Auto-actualizacion (manifest.json -> pipeline.py, INSTRUCCIONES.md, .bat)
+  └── [0b] Entorno (winget ffmpeg/Python 3.12 si faltan + venv en %LOCALAPPDATA%\Clase2PDF)
+         │
+         ▼
+pipeline.py
+  ├── [1] Escaneo de carpeta (audios, docs .pdf/.docx, apuntes base) + modo + API Key
+  ├── [2] Vocabulario tecnico (solo si hay docs): extrae terminos y siglas con Flash
+  ├── [3] Audio (ffmpeg): limpia ruido/voz y divide en bloques de 45 min (+15s solape)
+  ├── [4] Transcripcion: sube cada bloque a Gemini, transcribe con vocabulario y borra remoto
+  ├── [5] Triage de PDFs (si hay varios docs o >25 pags): recorta paginas o divide por temas
+  ├── [6] Sintesis: redacta apuntes estructurados o transcripcion revisada
+  └── [7] Exportacion y limpieza: HTML -> PDF con Edge/Chrome + borrado de .clase_pipeline\
+```
+
+Detalle de cada fase:
+
+1. **Arranque y auto-actualización (`procesar_clase.bat`):**
+   - Consulta `manifest.json` en GitHub y comprueba por SHA-256 si hay versión nueva de `pipeline.py` (en `%LOCALAPPDATA%\Clase2PDF`), `INSTRUCCIONES.md` (en la carpeta del `.bat`) o del propio `.bat`. Si no hay internet y ya existe copia local de `pipeline.py`, continúa en modo caché.
+   - Comprueba `ffmpeg` y `Python 3.12+` (si faltan, intenta instalarlos con `winget`) y prepara el entorno virtual `venv` con `google-genai`, `rich`, `questionary` y `pypdf`.
+2. **Escaneo e inicialización:**
+   - Detecta audios/vídeos compatibles (orden natural), documentos de apoyo (`.pdf`, `.docx`) y posibles apuntes previos (`APUNTES_*.pdf`, `TRANSCRIPCION_*.pdf`).
+   - Pregunta el modo (`apuntes` o `transcripcion`) si no se pasó `--mode`, y pide la API Key si aún no hay ninguna guardada.
+3. **Extracción de vocabulario técnico** *(solo si hay documentos en la carpeta)*:
+   - Analiza los `.pdf` y `.docx` con modelos Flash para extraer términos técnicos, siglas y nombres propios, mejorando la precisión de la transcripción posterior.
+4. **Limpieza y división de audio (`ffmpeg`):**
+   - Aplica filtros de limpieza de ruido de aula, ecualización de voz y normalización de volumen.
+   - Si un audio es largo, lo divide en bloques de 45 minutos (con 15 segundos de solapamiento) dentro de `.clase_pipeline/`. Guarda huella de cada audio para no repetir la limpieza si reintentas tras un fallo.
+5. **Transcripción por bloques:**
+   - Sube cada bloque limpio a Gemini, lo transcribe apoyándose en el vocabulario técnico y elimina el archivo remoto al terminar.
+   - Si una API agota cuota (`429`), rota automáticamente a la siguiente clave guardada; si el servidor devuelve saturación (`503`), cambia al siguiente modelo de la cadena.
+6. **Filtrado y división de documentos (Triage):**
+   - Si hay varios documentos o algún PDF supera las 25 páginas, recorta literalmente solo las páginas relevantes con `pypdf` sin resumir.
+   - Si hay un único PDF grande (`> 25 páginas`) como base (o como guía en modo `apuntes`), planifica y divide el trabajo por temas para generar varios PDFs temáticos en lugar de un único PDF gigante.
+7. **Síntesis, exportación a PDF y limpieza:**
+   - Redacta el documento final en Markdown según el modo elegido (`apuntes` o `transcripcion`).
+   - Convierte el Markdown a HTML y lo renderiza a `APUNTES_<tema>.pdf` o `TRANSCRIPCION_<tema>.pdf` usando Edge/Chrome en modo headless (conservando el `.md` solo si pasaste `--keep-md`).
+   - Elimina la carpeta temporal `.clase_pipeline\` al finalizar.
 
 ---
 
